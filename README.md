@@ -296,7 +296,7 @@ Telegram 主动通知轮询默认是 5 秒，可通过 `COCO_TELEGRAM_NOTIFY_POL
 - [x] 复用现有 status 面，暴露远程 `status`
 - [x] 暴露远程 `stop` / 最近 turn 摘要
 - [x] 持久化 Telegram 订阅列表和通知 cursor
-- [ ] 补 Telegram 命令层的自动化测试
+- [x] 补 Telegram 命令层的自动化测试
 - [x] 将 Telegram 鉴权从 username allowlist 升级为 numeric user ID allowlist
 
 ### Phase 4: 后台长任务编排
