@@ -98,8 +98,16 @@ PTY output 仍然进 JSONL transcript，用于调试和故障排查。
 - `stopReason`
 - 当前等待中的 turn 信息
 - 左右 session 的 pid/status
+- `recentTurns`
+- `progressSummary`
 
 `npm run status` 会读取最新 run 的 `status.json` 并打印当前状态。
+
+`progressSummary` 是一个面向手机查看的短摘要，会在每轮 forward 后自动更新。它会包含：
+
+- 当前是在等待哪一侧继续回复
+- 最近最多 3 轮转发摘要
+- 结束时的 stop reason / final preview
 
 `src/control.ts` 在这个状态面之上提供了一个很薄的本地控制 API：
 
@@ -214,6 +222,8 @@ npm run telegram
 - `/last [runId]`：查看最近一次转发摘要
 - `/help`
 
+`/status` 和 `/last` 都会带上 `progressSummary`，方便在手机上快速看进度，而不是只看原始状态字段。
+
 ## 技术栈
 
 - Node.js 22+、TypeScript、`tsx`
@@ -234,6 +244,7 @@ npm run telegram
 - [x] 最小控制平面（status.json / latest-run.json / broker.pid）
 - [x] 本地控制 API（startBroker / readStatus / stopBroker / lastTurn）
 - [x] Telegram v1（/run /status /stop /last）
+- [x] 进度摘要（recentTurns / progressSummary）
 - [x] Live test 通过（Codex + Claude 完成文件协议 roundtrip 并达成 AGREED）
 
 ## 下一阶段计划
@@ -248,7 +259,8 @@ npm run telegram
 
 ### Phase 4: 后台长任务编排
 
-- [ ] heartbeat / progress summary
+- [x] progress summary（写入 status.json，并在 CLI / Telegram 展示）
+- [ ] heartbeat
 - [ ] 为"睡觉时自动跑任务"建立最小闭环
 
 ## 与 OpenClaw 的关系

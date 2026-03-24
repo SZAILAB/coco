@@ -35,6 +35,11 @@ async function main() {
     console.log(`Preview: ${status.lastForward.preview}`);
   }
 
+  if (status.progressSummary) {
+    console.log("Summary:");
+    console.log(status.progressSummary.text);
+  }
+
   if (status.stopReason) {
     console.log(`Stop: ${status.stopReason} by ${status.stopBy ?? "unknown"}`);
     if (status.stopTextPreview) {

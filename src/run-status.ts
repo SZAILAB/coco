@@ -20,6 +20,11 @@ export type LastForward = {
   at: string;
 };
 
+export type ProgressSummary = {
+  text: string;
+  updatedAt: string;
+};
+
 export type SessionSnapshot = {
   name: string;
   pid: number | null;
@@ -44,6 +49,8 @@ export type RunStatus = {
   stopTextPreview: string | null;
   waitingFor: WaitingFor | null;
   lastForward: LastForward | null;
+  recentTurns: LastForward[];
+  progressSummary: ProgressSummary | null;
   sessions: {
     left: SessionSnapshot;
     right: SessionSnapshot;
@@ -101,11 +108,14 @@ export class RunStatusWriter {
       stopTextPreview: null,
       waitingFor: null,
       lastForward: null,
+      recentTurns: [],
+      progressSummary: null,
       sessions: {
         left: { name: init.leftName, pid: null, status: "starting" },
         right: { name: init.rightName, pid: null, status: "starting" },
       },
     };
+    this.refreshSummary(now);
   }
 
   async init(): Promise<void> {
@@ -121,6 +131,7 @@ export class RunStatusWriter {
       pid,
       status: "running",
     };
+    this.refreshSummary();
     await this.flush();
   }
 
@@ -129,6 +140,7 @@ export class RunStatusWriter {
       ...this.status.sessions[side],
       status: "exited",
     };
+    this.refreshSummary();
     await this.flush();
   }
 
@@ -155,18 +167,22 @@ export class RunStatusWriter {
       donePath: event.donePath,
       resentCount,
     };
+    this.refreshSummary();
     await this.flush();
   }
 
   async forwarded(event: { from: string; to: string; round: number; text: string }): Promise<void> {
-    this.status.round = event.round;
-    this.status.lastForward = {
+    const forward: LastForward = {
       from: event.from,
       to: event.to,
       round: event.round,
       preview: preview(event.text),
       at: new Date().toISOString(),
     };
+    this.status.round = event.round;
+    this.status.lastForward = forward;
+    this.status.recentTurns = [...this.status.recentTurns, forward].slice(-3);
+    this.refreshSummary(forward.at);
     await this.flush();
   }
 
@@ -178,6 +194,7 @@ export class RunStatusWriter {
     this.status.stopBy = event.by;
     this.status.stopTextPreview = preview(event.text);
     this.status.waitingFor = null;
+    this.refreshSummary(now);
     this.status.updatedAt = now;
     await this.writeStatus();
     await this.writeLatest();
@@ -219,6 +236,13 @@ export class RunStatusWriter {
     };
     await writeFile(this.paths.latestFile, `${JSON.stringify(latest, null, 2)}\n`, "utf8");
   }
+
+  private refreshSummary(updatedAt = new Date().toISOString()): void {
+    this.status.progressSummary = {
+      text: buildProgressSummary(this.status),
+      updatedAt,
+    };
+  }
 }
 
 export async function readLatestRunStatus(
@@ -251,4 +275,39 @@ async function resolveLatestStatusFile(brokerRoot: string): Promise<string | nul
 
 function preview(text: string, max = 160): string {
   return text.replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function buildProgressSummary(status: RunStatus): string {
+  const lines: string[] = [];
+
+  if (status.phase === "stopped") {
+    lines.push(`Stopped (${status.stopReason ?? "unknown"}) by ${status.stopBy ?? "unknown"}.`);
+    if (status.stopTextPreview) {
+      lines.push(`Final: ${status.stopTextPreview}`);
+    }
+  } else {
+    const exited = status.sessions.left.status === "exited" ? status.sessions.left : status.sessions.right.status === "exited" ? status.sessions.right : null;
+    if (exited) {
+      lines.push(`Recovery: ${exited.name} exited; waiting for watchdog restart.`);
+    } else if (status.phase === "starting") {
+      lines.push("Starting broker run.");
+    }
+
+    if (status.waitingFor) {
+      lines.push(
+        `Waiting for ${status.waitingFor.agent} turn ${status.waitingFor.turn} (round ${status.waitingFor.round}, resends ${status.waitingFor.resentCount}).`,
+      );
+    }
+  }
+
+  if (status.recentTurns.length > 0) {
+    lines.push("Recent progress:");
+    for (const turn of status.recentTurns) {
+      lines.push(`- Round ${turn.round} ${turn.from} -> ${turn.to}: ${turn.preview}`);
+    }
+  } else if (status.phase !== "stopped") {
+    lines.push("No turns forwarded yet.");
+  }
+
+  return lines.join("\n");
 }

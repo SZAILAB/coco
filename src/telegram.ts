@@ -72,6 +72,10 @@ bot.command("status", async (ctx) => {
     lines.push(`Last: ${status.lastForward.from} -> ${status.lastForward.to}`);
     lines.push(`Preview: ${status.lastForward.preview}`);
   }
+  if (status.progressSummary) {
+    lines.push("Summary:");
+    lines.push(status.progressSummary.text);
+  }
   if (status.stopReason) {
     lines.push(`Stop: ${status.stopReason} by ${status.stopBy}`);
   }
@@ -112,6 +116,11 @@ bot.command("last", async (ctx) => {
     `Run: ${summary.runId} (${summary.phase})`,
     `Round: ${summary.round}`,
   ];
+
+  if (summary.progressSummary) {
+    lines.push("Summary:");
+    lines.push(summary.progressSummary.text);
+  }
 
   if (summary.lastForward) {
     lines.push(`${summary.lastForward.from} -> ${summary.lastForward.to}:`);
