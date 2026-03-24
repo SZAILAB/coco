@@ -206,4 +206,31 @@ describe("collectStatusNotifications", () => {
     expect(fatal.notifications[0]?.kind).toBe("stop");
     expect(fatal.notifications[0]?.text).toContain("Run run-123 failed (fatal) by system.");
   });
+
+  it("does not emit recovery notifications after a run has stopped", () => {
+    const seeded = collectStatusNotifications(createNotificationCursor(), makeStatus()).cursor;
+    const stopped = collectStatusNotifications(
+      seeded,
+      makeStatus({
+        phase: "stopped",
+        stoppedAt: "2026-03-24T00:00:20.000Z",
+        stopReason: "keyword",
+        stopBy: "claude",
+        stopTextPreview: "AGREED",
+        waitingFor: null,
+        sessions: {
+          left: { name: "codex", pid: 201, status: "exited" },
+          right: { name: "claude", pid: 202, status: "running" },
+        },
+        progressSummary: {
+          text: "Stopped (keyword) by claude.\nFinal: AGREED",
+          updatedAt: "2026-03-24T00:00:20.000Z",
+        },
+      }),
+    );
+
+    expect(stopped.notifications).toHaveLength(1);
+    expect(stopped.notifications[0]?.kind).toBe("stop");
+    expect(stopped.notifications[0]?.text).not.toContain("Recovery alert");
+  });
 });

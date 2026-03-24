@@ -58,31 +58,38 @@ export function collectStatusNotifications(
 
   const notifications: StatusNotification[] = [];
 
-  const exitKey = buildExitKey(status);
-  if (exitKey && exitKey !== next.lastExitKey) {
-    const text = [
-      `Recovery alert for ${status.runId}`,
-      exitKey.includes(":left:") ? `codex exited; waiting for watchdog restart.` : `claude exited; waiting for watchdog restart.`,
-      status.progressSummary?.text,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    pushRecoveryNotification(notifications, next, status.updatedAt, text, recoveryThrottleMs);
-  }
-  next.lastExitKey = exitKey;
+  if (status.phase !== "stopped") {
+    const exitKey = buildExitKey(status);
+    if (exitKey && exitKey !== next.lastExitKey) {
+      const text = [
+        `Recovery alert for ${status.runId}`,
+        exitKey.includes(":left:")
+          ? `codex exited; waiting for watchdog restart.`
+          : `claude exited; waiting for watchdog restart.`,
+        status.progressSummary?.text,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      pushRecoveryNotification(notifications, next, status.updatedAt, text, recoveryThrottleMs);
+    }
+    next.lastExitKey = exitKey;
 
-  const resendKey = buildResendKey(status);
-  if (resendKey && resendKey !== next.lastResendKey && status.waitingFor) {
-    const text = [
-      `Recovery update for ${status.runId}`,
-      `Resent the current prompt to ${status.waitingFor.agent} turn ${status.waitingFor.turn} (resends ${status.waitingFor.resentCount}).`,
-      status.progressSummary?.text,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    pushRecoveryNotification(notifications, next, status.updatedAt, text, recoveryThrottleMs);
+    const resendKey = buildResendKey(status);
+    if (resendKey && resendKey !== next.lastResendKey && status.waitingFor) {
+      const text = [
+        `Recovery update for ${status.runId}`,
+        `Resent the current prompt to ${status.waitingFor.agent} turn ${status.waitingFor.turn} (resends ${status.waitingFor.resentCount}).`,
+        status.progressSummary?.text,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      pushRecoveryNotification(notifications, next, status.updatedAt, text, recoveryThrottleMs);
+    }
+    next.lastResendKey = resendKey;
+  } else {
+    next.lastExitKey = null;
+    next.lastResendKey = null;
   }
-  next.lastResendKey = resendKey;
 
   const forwardKey = status.lastForward ? `${status.runId}:${status.lastForward.at}` : null;
   if (forwardKey && forwardKey !== next.lastForwardKey && status.lastForward) {
