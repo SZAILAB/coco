@@ -6,12 +6,18 @@ export type NotificationCursor = {
   lastStopKey: string | null;
   lastExitKey: string | null;
   lastResendKey: string | null;
+  lastRecoveryAt: string | null;
+  lastRecoveryText: string | null;
 };
 
 export type StatusNotification = {
   kind: "forward" | "recovery" | "stop";
   runId: string;
   text: string;
+};
+
+type NotifyOptions = {
+  recoveryThrottleMs?: number;
 };
 
 export function createNotificationCursor(): NotificationCursor {
@@ -21,16 +27,21 @@ export function createNotificationCursor(): NotificationCursor {
     lastStopKey: null,
     lastExitKey: null,
     lastResendKey: null,
+    lastRecoveryAt: null,
+    lastRecoveryText: null,
   };
 }
 
 export function collectStatusNotifications(
   cursor: NotificationCursor,
   status: RunStatus | null,
+  options: NotifyOptions = {},
 ): { cursor: NotificationCursor; notifications: StatusNotification[] } {
   if (!status) {
     return { cursor, notifications: [] };
   }
+
+  const recoveryThrottleMs = options.recoveryThrottleMs ?? 30_000;
 
   let next =
     cursor.runId === status.runId
@@ -41,39 +52,35 @@ export function collectStatusNotifications(
           lastStopKey: null,
           lastExitKey: null,
           lastResendKey: null,
+          lastRecoveryAt: null,
+          lastRecoveryText: null,
         };
 
   const notifications: StatusNotification[] = [];
 
   const exitKey = buildExitKey(status);
   if (exitKey && exitKey !== next.lastExitKey) {
-    notifications.push({
-      kind: "recovery",
-      runId: status.runId,
-      text: [
-        `Recovery alert for ${status.runId}`,
-        exitKey.includes(":left:") ? `codex exited; waiting for watchdog restart.` : `claude exited; waiting for watchdog restart.`,
-        status.progressSummary?.text,
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
-    });
+    const text = [
+      `Recovery alert for ${status.runId}`,
+      exitKey.includes(":left:") ? `codex exited; waiting for watchdog restart.` : `claude exited; waiting for watchdog restart.`,
+      status.progressSummary?.text,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    pushRecoveryNotification(notifications, next, status.updatedAt, text, recoveryThrottleMs);
   }
   next.lastExitKey = exitKey;
 
   const resendKey = buildResendKey(status);
   if (resendKey && resendKey !== next.lastResendKey && status.waitingFor) {
-    notifications.push({
-      kind: "recovery",
-      runId: status.runId,
-      text: [
-        `Recovery update for ${status.runId}`,
-        `Resent the current prompt to ${status.waitingFor.agent} turn ${status.waitingFor.turn} (resends ${status.waitingFor.resentCount}).`,
-        status.progressSummary?.text,
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
-    });
+    const text = [
+      `Recovery update for ${status.runId}`,
+      `Resent the current prompt to ${status.waitingFor.agent} turn ${status.waitingFor.turn} (resends ${status.waitingFor.resentCount}).`,
+      status.progressSummary?.text,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    pushRecoveryNotification(notifications, next, status.updatedAt, text, recoveryThrottleMs);
   }
   next.lastResendKey = resendKey;
 
@@ -101,7 +108,7 @@ export function collectStatusNotifications(
       kind: "stop",
       runId: status.runId,
       text: [
-        `Run ${status.runId} stopped (${status.stopReason ?? "unknown"}) by ${status.stopBy ?? "unknown"}.`,
+        buildStopHeadline(status),
         status.stopTextPreview ? `Final: ${status.stopTextPreview}` : null,
         status.progressSummary?.text,
       ]
@@ -112,6 +119,47 @@ export function collectStatusNotifications(
   next.lastStopKey = stopKey;
 
   return { cursor: next, notifications };
+}
+
+function pushRecoveryNotification(
+  notifications: StatusNotification[],
+  cursor: NotificationCursor,
+  updatedAt: string,
+  text: string,
+  throttleMs: number,
+): void {
+  const lastAtMs = cursor.lastRecoveryAt ? Date.parse(cursor.lastRecoveryAt) : Number.NaN;
+  const currentMs = Date.parse(updatedAt);
+  const throttled =
+    cursor.lastRecoveryText === text &&
+    Number.isFinite(lastAtMs) &&
+    Number.isFinite(currentMs) &&
+    currentMs - lastAtMs < throttleMs;
+
+  if (throttled) return;
+
+  notifications.push({
+    kind: "recovery",
+    runId: cursor.runId ?? "unknown",
+    text,
+  });
+  cursor.lastRecoveryAt = updatedAt;
+  cursor.lastRecoveryText = text;
+}
+
+function buildStopHeadline(status: RunStatus): string {
+  const reason = status.stopReason ?? "unknown";
+  const by = status.stopBy ?? "unknown";
+
+  if (reason === "fatal" || reason === "timeout" || reason === "session-exit") {
+    return `Run ${status.runId} failed (${reason}) by ${by}.`;
+  }
+
+  if (reason === "interrupted") {
+    return `Run ${status.runId} was interrupted by ${by}.`;
+  }
+
+  return `Run ${status.runId} stopped (${reason}) by ${by}.`;
 }
 
 function buildExitKey(status: RunStatus): string | null {

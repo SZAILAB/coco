@@ -151,4 +151,59 @@ describe("collectStatusNotifications", () => {
     const second = collectStatusNotifications(first.cursor, stoppedStatus);
     expect(second.notifications).toHaveLength(0);
   });
+
+  it("throttles repeated identical recovery notifications", () => {
+    const base = createNotificationCursor();
+    const status = makeStatus({
+      sessions: {
+        left: { name: "codex", pid: 201, status: "exited" },
+        right: { name: "claude", pid: 202, status: "running" },
+      },
+      updatedAt: "2026-03-24T00:00:12.000Z",
+      progressSummary: {
+        text: "Recovery: codex exited; waiting for watchdog restart.",
+        updatedAt: "2026-03-24T00:00:12.000Z",
+      },
+    });
+
+    const first = collectStatusNotifications(base, status, { recoveryThrottleMs: 30_000 });
+    expect(first.notifications).toHaveLength(1);
+
+    const second = collectStatusNotifications(
+      first.cursor,
+      {
+        ...status,
+        updatedAt: "2026-03-24T00:00:20.000Z",
+        progressSummary: {
+          text: "Recovery: codex exited; waiting for watchdog restart.",
+          updatedAt: "2026-03-24T00:00:20.000Z",
+        },
+      },
+      { recoveryThrottleMs: 30_000 },
+    );
+    expect(second.notifications).toHaveLength(0);
+  });
+
+  it("upgrades fatal stop notifications", () => {
+    const seeded = collectStatusNotifications(createNotificationCursor(), makeStatus()).cursor;
+    const fatal = collectStatusNotifications(
+      seeded,
+      makeStatus({
+        phase: "stopped",
+        stoppedAt: "2026-03-24T00:00:20.000Z",
+        stopReason: "fatal",
+        stopBy: "system",
+        stopTextPreview: "broker stopped after fatal error",
+        waitingFor: null,
+        progressSummary: {
+          text: "Stopped (fatal) by system.\nFinal: broker stopped after fatal error",
+          updatedAt: "2026-03-24T00:00:20.000Z",
+        },
+      }),
+    );
+
+    expect(fatal.notifications).toHaveLength(1);
+    expect(fatal.notifications[0]?.kind).toBe("stop");
+    expect(fatal.notifications[0]?.text).toContain("Run run-123 failed (fatal) by system.");
+  });
 });
