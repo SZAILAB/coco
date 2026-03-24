@@ -11,18 +11,19 @@ if (!token) {
   process.exit(1);
 }
 
-const allowedUsers = (process.env.COCO_TELEGRAM_USERS ?? "")
+// Allowlist by numeric user ID (stable, unlike usernames which can change)
+const allowedUserIds = (process.env.COCO_TELEGRAM_USERS ?? "")
   .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+  .map((s) => Number.parseInt(s.trim(), 10))
+  .filter((n) => Number.isFinite(n) && n > 0);
 
 const cfg = defaultControlConfig();
 const bot = new Bot(token);
 
-// Auth guard
+// Auth guard — checks from.id against allowlist
 bot.use(async (ctx, next) => {
-  const username = ctx.from?.username;
-  if (allowedUsers.length > 0 && (!username || !allowedUsers.includes(username))) {
+  const userId = ctx.from?.id;
+  if (allowedUserIds.length > 0 && (!userId || !allowedUserIds.includes(userId))) {
     await ctx.reply("Not authorized.");
     return;
   }

@@ -196,13 +196,15 @@ npm run status
 
 ### Telegram 模式
 
-先准备一个 Telegram bot token，并把允许访问的用户名放进 `COCO_TELEGRAM_USERS`：
+先准备一个 Telegram bot token，并把允许访问的 Telegram numeric user ID 放进 `COCO_TELEGRAM_USERS`：
 
 ```bash
 COCO_TELEGRAM_TOKEN=xxx \
-COCO_TELEGRAM_USERS=your_username \
+COCO_TELEGRAM_USERS=123456789 \
 npm run telegram
 ```
+
+`COCO_TELEGRAM_USERS` 是逗号分隔的 numeric user ID 列表。可以用 `@userinfobot` 或其他同类 bot 查自己的 Telegram user ID。
 
 当前支持的命令：
 
@@ -242,7 +244,7 @@ npm run telegram
 - [x] 复用现有 status 面，暴露远程 `status`
 - [x] 暴露远程 `stop` / 最近 turn 摘要
 - [ ] 补 Telegram 命令层的自动化测试
-- [ ] 增加更稳的鉴权策略（目前是基于 username 的 allowlist）
+- [x] 将 Telegram 鉴权从 username allowlist 升级为 numeric user ID allowlist
 
 ### Phase 4: 后台长任务编排
 
