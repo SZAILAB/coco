@@ -240,6 +240,14 @@ npm run telegram
 
 `/status` 和 `/last` 都会带上 `progressSummary`，方便在手机上快速看进度，而不是只看原始状态字段。
 
+只要你已经和 bot 交互过并进入了订阅列表，Telegram 还会主动推送：
+
+- 新的 turn forward
+- watchdog 恢复相关事件（session exit / resend）
+- run 停止（`AGREED` / `BLOCKED` / `timeout` / `fatal` / 手动中断）
+
+Telegram 主动通知轮询默认是 5 秒，可通过 `COCO_TELEGRAM_NOTIFY_POLL_MS` 调整；设为 `0` 可关闭。
+
 ## 技术栈
 
 - Node.js 22+、TypeScript、`tsx`
@@ -260,6 +268,7 @@ npm run telegram
 - [x] 最小控制平面（status.json / latest-run.json / broker.pid）
 - [x] 本地控制 API（startBroker / readStatus / stopBroker / lastTurn）
 - [x] Telegram v1（/run /status /stop /last）
+- [x] Telegram 主动通知（forward / recovery / stop）
 - [x] 进度摘要（recentTurns / progressSummary）
 - [x] heartbeat（周期刷新 status.json，标记 run 仍然存活）
 - [x] Live test 通过（Codex + Claude 完成文件协议 roundtrip 并达成 AGREED）
@@ -278,6 +287,7 @@ npm run telegram
 
 - [x] progress summary（写入 status.json，并在 CLI / Telegram 展示）
 - [x] heartbeat
+- [x] Telegram 主动通知
 - [ ] 为"睡觉时自动跑任务"建立最小闭环
 
 ## 与 OpenClaw 的关系

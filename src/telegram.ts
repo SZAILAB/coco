@@ -1,5 +1,6 @@
 import { Bot } from "grammy";
 import { defaultControlConfig, lastTurn, readStatus, startBroker, stopBroker } from "./control.js";
+import { collectStatusNotifications, createNotificationCursor } from "./telegram-notify.js";
 
 // ---------------------------------------------------------------------------
 // Telegram bot — thin shell over control.ts
@@ -19,6 +20,11 @@ const allowedUserIds = (process.env.COCO_TELEGRAM_USERS ?? "")
 
 const cfg = defaultControlConfig();
 const bot = new Bot(token);
+const subscribers = new Set<number>();
+const notifyPollMs = Math.max(
+  0,
+  Number.parseInt(process.env.COCO_TELEGRAM_NOTIFY_POLL_MS ?? "5000", 10) || 5_000,
+);
 
 // Auth guard — checks from.id against allowlist
 bot.use(async (ctx, next) => {
@@ -26,6 +32,9 @@ bot.use(async (ctx, next) => {
   if (allowedUserIds.length > 0 && (!userId || !allowedUserIds.includes(userId))) {
     await ctx.reply("Not authorized.");
     return;
+  }
+  if (ctx.chat?.id) {
+    subscribers.add(ctx.chat.id);
   }
   await next();
 });
@@ -161,6 +170,53 @@ bot.command("help", async (ctx) => {
 
 // Start
 console.log("[telegram] Starting bot...");
+startNotifier();
 bot.start({
   onStart: () => console.log("[telegram] Bot is running"),
 });
+
+function startNotifier(): void {
+  if (notifyPollMs <= 0) return;
+
+  let seeded = false;
+  let cursor = createNotificationCursor();
+  let polling = false;
+
+  const poll = async () => {
+    if (polling || subscribers.size === 0) return;
+    polling = true;
+    try {
+      const status = await readStatus(undefined, cfg);
+      const result = collectStatusNotifications(cursor, status);
+      cursor = result.cursor;
+
+      if (!seeded) {
+        seeded = true;
+        return;
+      }
+
+      for (const notification of result.notifications) {
+        await broadcast(notification.text);
+      }
+    } catch (err) {
+      console.error("[telegram] Notification poll failed:", err);
+    } finally {
+      polling = false;
+    }
+  };
+
+  const timer = setInterval(() => {
+    void poll();
+  }, notifyPollMs);
+  timer.unref?.();
+}
+
+async function broadcast(text: string): Promise<void> {
+  for (const chatId of subscribers) {
+    try {
+      await bot.api.sendMessage(chatId, text);
+    } catch (err) {
+      console.error(`[telegram] Failed to notify chat ${chatId}:`, err);
+    }
+  }
+}
