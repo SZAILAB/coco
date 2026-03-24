@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "broker": "tsx src/run-broker.ts",
     "dev": "tsx src/index.ts",
+    "postinstall": "node scripts/fix-node-pty-helper.mjs",
     "test": "vitest run"
   },
   "dependencies": {

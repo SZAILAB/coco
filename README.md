@@ -5,284 +5,107 @@
 它的目标不是做成一个通用平台，也不是复刻 OpenClaw，而是专注解决一个非常具体的个人工作流问题：
 
 - 在本地或服务器上稳定拉起 `codex`、`claude` 这类交互式 CLI
-- 持续读取输出、写入输入、记录日志
-- 在进程异常退出或卡住时自动恢复
-- 为后续的双 agent 对话、远程控制、定时汇报打下一个足够稳的底座
+- 让两个 agent 围绕一个任务自动讨论并达成结论
+- 在进程异常退出时自动恢复并继续对话
+- 为后续的远程控制、定时汇报打下一个足够稳的底座
 
-当前仓库处于第一阶段，重点是把“单个 agent 会话跑稳”这件事做扎实。
+## 当前状态
 
-## 为什么要做这个项目
+项目已经完成了两个阶段：
 
-现有方案里，像 OpenClaw 这样的系统能力很强，但对当前需求来说偏重。
+- **Phase 1：单会话 runtime** — 已通过真机 smoke test（启动、输入输出、异常重启、退出日志完整性）
+- **Phase 2：双 agent broker** — 已通过 live test（Codex 和 Claude 通过文件协议完成多轮讨论并达成 AGREED）
 
-这个项目的取舍是：
+## 核心架构
 
-- 不做插件系统
-- 不做多渠道消息接入
-- 不做复杂权限和路由
-- 不做通用 agent 平台抽象
+### 文件协议（broker 正文通道）
 
-先只做最核心的运行时能力：
+broker 不从 PTY 输出中提取正文。TUI 输出天然不是给机器读的，从中"猜正文"会陷入无限追噪声的循环。
 
-- 启动一个交互式 agent
-- 像人操作 terminal 一样给它输入
-- 实时拿到它的输出
-- 把完整事件写入 transcript
-- 在故障时自动重启
+取而代之的是文件协议：
 
-如果这个地基不稳，后面的 broker、Telegram 控制、睡觉时自动跑任务都没有意义。
+1. broker 给 agent 指定一个输出文件路径和 `.done` 标记路径
+2. agent 把回复写到指定文件
+3. agent 写完后创建 `.done` 文件
+4. broker 读取文件内容，转发给对端 agent
 
-## 当前阶段目标
+Turn 文件按轮次编号存储：
 
-第一阶段的目标很明确：
+```text
+state/broker/<run-id>/
+  codex/
+    turn-001.md
+    turn-001.done
+  claude/
+    turn-001.md
+    turn-001.done
+    turn-002.md
+    turn-002.done
+```
 
-1. 启动一个真实的 CLI agent 会话
-2. 支持 stdin -> PTY 的实时透传
-3. 支持 PTY -> stdout 的实时输出
-4. 把输入、输出、启动、退出、错误写入 JSONL transcript
-5. 在启动失败、异常退出、超时无响应时保留恢复能力
-6. 在关闭时尽量保证生命周期事件完整落盘
+这个设计的优势：
 
-当前版本已经围绕这些目标完成了最小实现。
+- 可预测、可测试、可复盘
+- 不依赖 TUI 厂商的输出格式
+- 后续接 Telegram 或远程控制也更自然
 
-## 当前实现了什么
+PTY output 仍然进 JSONL transcript，用于调试和故障排查。
 
-### 1. 单会话 PTY 封装
+### 单会话 PTY 封装
 
-`src/pty-session.ts` 负责管理一个交互式进程的生命周期：
+`src/pty-session.ts` 管理一个交互式进程的完整生命周期：
 
-- `start()`
-- `write()`
-- `send()`
-- `stop()`
-- `restart()`
-- `onEvent()`
+- 状态机：`idle → starting → running → stopped/crashed`
+- 事件：`start / input / output / exit / error`
+- generation 计数器防止旧进程回调覆盖新进程状态
+- `stop()` 等待 PTY 真正退出后再返回（带 5s 安全超时）
+- Claude 长消息分片发送，绕开 paste artifact 问题
 
-它内部维护了最基本的会话状态：
+### Watchdog
 
-- `idle`
-- `starting`
-- `running`
-- `stopped`
-- `crashed`
+`src/watchdog.ts` 监控会话状态：
 
-并向外发出统一事件：
+- 进程退出后自动重启（带最大重启次数限制）
+- 可选的 no-output 超时检测（默认关闭）
+- broker 模式下 watchdog 重启后，broker 会自动重发当前 turn 的 prompt
 
-- `start`
-- `input`
-- `output`
-- `exit`
-- `error`
+### Broker
 
-### 2. JSONL Transcript
+`src/broker.ts` 编排双 agent 对话：
 
-`src/transcript.ts` 会把所有会话事件追加到 `logs/<session-id>.jsonl`。
+- 非对称角色：writer（提方案）+ reviewer（审方案）
+- 文件协议：每轮分配 `turn-NNN.md` + `.done`，轮询等待完成
+- 三层停止条件：keyword（`AGREED` / `BLOCKED`）、重复检测、最大轮次
+- session exit 不会立即终止 broker，给 watchdog 时间恢复
+- turn 超时兜底（默认 5 分钟）
 
-这样后续做这些事情时都有可靠的数据基础：
+### JSONL Transcript
 
-- 回看 agent 到底收到了什么输入
-- 检查崩溃前最后几条输出
-- 把一个 agent 的回复转发给另一个 agent
-- 做周期性摘要或远程状态查询
+`src/transcript.ts` 记录所有会话事件到 `logs/<session-id>.jsonl`：
 
-### 3. Watchdog 与自动重启
+- 完整的 I/O 历史（包括 TUI 噪声），用于事后排查
+- `close()` 返回 Promise，shutdown 时 await 保证不丢尾部日志
 
-`src/watchdog.ts` 负责监控会话状态。
-
-当前支持：
-
-- 进程退出后自动重启
-- 可选的 no-output 超时检测
-- 最大重启次数限制
-- watchdog 自己的错误兜底，避免未处理 rejection
-
-### 4. 交互式 CLI 入口
-
-`src/index.ts` 提供一个非常薄的入口层：
-
-- 创建会话
-- 挂载 transcript
-- 启动 watchdog
-- 将当前终端的 stdin 透传给 agent
-- 将 agent 的输出打印回当前终端
-- 支持 `Ctrl+Q` 退出 `coco`
-
-## 当前目录结构
+## 目录结构
 
 ```text
 coco/
   package.json
   tsconfig.json
+  scripts/
+    fix-node-pty-helper.mjs
   src/
-    index.ts
-    pty-session.ts
-    transcript.ts
-    watchdog.ts
-  logs/
+    index.ts           # 单会话入口
+    run-broker.ts      # 双 agent broker 入口
+    pty-session.ts     # PTY 封装
+    broker.ts          # 文件协议 broker
+    watchdog.ts        # 自动重启
+    transcript.ts      # JSONL 日志
+    sanitize.ts        # TUI 输出清洗（调试辅助）
+    *.test.ts          # 测试
+  logs/                # transcript 输出
+  state/broker/        # broker turn 文件
 ```
-
-这个结构是刻意保持极简的。
-
-当前没有引入：
-
-- 数据库
-- Web UI
-- Telegram Bot
-- tmux 控制层
-- 多 agent broker
-- 复杂配置系统
-
-这些能力都要等单会话 runtime 足够稳定之后再加。
-
-## 技术选型
-
-当前技术栈：
-
-- Node.js 22+
-- TypeScript
-- `tsx`
-- `node-pty`
-- `vitest`
-
-之所以先用 TypeScript，而不是 Rust，是因为当前阶段的核心问题是 I/O 编排和工作流验证，不是性能瓶颈。
-
-现阶段更重要的是：
-
-- 快速迭代
-- 快速改状态机
-- 快速验证故障边界
-- 快速加 broker 和远程控制
-
-如果未来这个项目真的长期常驻、规模变大，再考虑把底层 runner/watchdog 部分重写成 Rust。
-
-## 与 OpenClaw 的关系
-
-这个项目明显借鉴了 OpenClaw 的几类思路，但不复用它的整个平台结构。
-
-主要借鉴点：
-
-- PTY 驱动交互式 CLI
-- 进程生命周期管理
-- no-output watchdog
-- 事件驱动而不是直接耦合各层逻辑
-
-不打算照搬的部分：
-
-- 大而全的工具层
-- 多 channel 接入
-- session/router/plugin 体系
-- 平台化架构
-
-一句话概括：
-
-`coco` 更像是一个“围绕个人 agent 工作流定制的极简 runtime”。
-
-## 已完成的 TODO
-
-下面这些已经完成，且代码里已有对应实现：
-
-- [x] 初始化 TypeScript 项目骨架
-- [x] 引入 `node-pty`，能拉起单个交互式进程
-- [x] 统一单会话接口：`start / write / send / stop / restart / onEvent`
-- [x] 实时透传终端输入输出
-- [x] 记录 `start / input / output / exit / error` 事件
-- [x] transcript 以 JSONL 形式落盘
-- [x] 加入 watchdog，支持异常退出后自动重启
-- [x] 支持 no-output 超时检测的基本框架
-- [x] 处理旧进程 `onExit` 回调覆盖新进程状态的竞态问题
-- [x] 处理 `start()` 失败后卡在 `starting` 的问题
-- [x] 处理 watchdog 中未捕获 promise rejection 的问题
-- [x] 处理 transcript 在退出时可能丢尾部日志的问题
-- [x] 处理 `stop()` 超时后状态不清理、导致后续无法重启的问题
-- [x] 增加 shutdown 防重入，避免多次信号重复执行关闭逻辑
-
-## 下一阶段计划
-
-当前项目的下一步，不是继续堆基础设施，而是在现有稳定地基上逐步扩展能力。
-
-### Phase 1: 真机验证与打磨
-
-目标：
-
-- 用真实 `codex` 会话完成一次完整 smoke test
-- 验证 transcript 是否包含完整生命周期事件
-- 验证 watchdog 在真实异常退出时的恢复行为
-
-待完成事项：
-
-- [ ] 在目标机器上跑真实 `codex` 会话
-- [ ] 验证 `Ctrl+Q` 退出后的 transcript 完整性
-- [ ] 人工杀进程，验证 watchdog 重启
-- [ ] 根据真实使用情况微调 timeout 和重启策略
-
-### Phase 2: 双 agent broker
-
-目标：
-
-- 让两个会话之间自动转发消息
-- 为“Codex 和 Claude 互相讨论”建立最小闭环
-
-计划事项：
-
-- [ ] 新增 `broker.ts`
-- [ ] 订阅两个 session 的 `output` 事件
-- [ ] 把一个 agent 的输出包装后写给另一个 agent
-- [ ] 增加循环保护，避免无限 ping-pong
-- [ ] 增加简单的转发规则和停止条件
-
-### Phase 3: 远程控制
-
-目标：
-
-- 人不在电脑前时，也能远程查看状态和下达简单指令
-
-计划事项：
-
-- [ ] 接 Telegram 作为第一版远程入口
-- [ ] 支持 `status`
-- [ ] 支持 `start`
-- [ ] 支持 `stop`
-- [ ] 支持查看最近 transcript 摘要
-
-### Phase 4: 后台长任务编排
-
-目标：
-
-- 支持更长时间运行的任务
-- 支持周期性汇报
-- 支持异常恢复后的继续推进
-
-计划事项：
-
-- [ ] 增加 heartbeat / progress summary
-- [ ] 增加更清晰的任务状态输出
-- [ ] 设计大任务的 broker 策略
-- [ ] 为“睡觉时自动跑任务”建立最小可用闭环
-
-## 非目标
-
-至少在当前阶段，这些都不是本项目要解决的问题：
-
-- 做成通用 AI 平台
-- 支持大量 provider / channel
-- 做复杂权限系统
-- 做 UI 优先的产品
-- 解决所有 tmux 自动化问题
-- 做分布式任务调度
-
-这些都可能以后再考虑，但不会影响当前阶段的判断标准。
-
-## 当前判断标准
-
-只有下面这些都稳定后，第一阶段才算真正完成：
-
-- 能稳定启动真实 agent
-- 能稳定输入和读取输出
-- 能稳定写 transcript
-- 能在异常退出时自动恢复
-- 能在关闭时尽量保住完整事件
-
-只要这几点没有跑稳，就不应该急着进入复杂 broker 或远程控制。
 
 ## 运行方式
 
@@ -292,25 +115,13 @@ coco/
 npm install
 ```
 
-开发运行：
+### 单会话模式
 
 ```bash
 npm run dev
 ```
 
-默认行为：
-
-- 默认命令是 `codex`
-- 如果没有传参，默认参数是 `--full-auto`
-- 工作目录默认是当前目录，或通过 `COCO_CWD` 指定
-
-示例：
-
-```bash
-npx tsx src/index.ts
-```
-
-指定命令和参数：
+默认启动 `codex --full-auto`。指定其他 agent：
 
 ```bash
 npx tsx src/index.ts claude --dangerously-skip-permissions
@@ -322,15 +133,57 @@ npx tsx src/index.ts claude --dangerously-skip-permissions
 COCO_CWD=~/my-project npx tsx src/index.ts
 ```
 
-运行时行为：
+`Ctrl+Q` 退出 coco。
 
-- 当前 terminal 的输入会直接透传给 agent
-- agent 输出会实时打印回当前 terminal
-- `Ctrl+Q` 会退出 `coco`
-- transcript 会写到 `logs/<session-id>.jsonl`
+### Broker 模式
 
-## 目前最重要的一句话
+```bash
+npm run broker -- "用一段话讨论 Node.js CLI 是否应该对瞬态 API 错误使用指数退避"
+```
 
-`coco` 现在不是一个“全能 agent 平台”，而是一个为了后续多 agent 自动协作而先打稳单会话 runtime 的项目。
+默认左侧 `codex --full-auto`，右侧 `claude --dangerously-skip-permissions`。可通过环境变量覆盖：
 
-如果后续一切顺利，它会逐步长出 broker、远程控制和长任务编排能力；但现阶段最重要的仍然是把底层生命周期边界跑扎实。
+```bash
+COCO_LEFT_CMD=claude COCO_LEFT_ARGS="--dangerously-skip-permissions" \
+COCO_RIGHT_CMD=codex COCO_RIGHT_ARGS="--full-auto" \
+npm run broker -- "讨论任务"
+```
+
+Turn 文件写入 `state/broker/<run-id>/`，transcript 写入 `logs/`。
+
+## 技术栈
+
+- Node.js 22+、TypeScript、`tsx`
+- `node-pty`（PTY 驱动）
+- `vitest`（测试）
+- 不依赖数据库、Web UI、消息队列
+
+## 已完成
+
+- [x] 单会话 PTY 封装（start/write/send/stop/restart/onEvent）
+- [x] JSONL transcript 落盘
+- [x] Watchdog 自动重启
+- [x] 生命周期竞态修复（generation 计数器、stop 等待 exit、start 失败回滚、shutdown 防重入）
+- [x] 真机 smoke test 通过（正常启动、异常退出恢复、启动失败恢复、退出日志完整性）
+- [x] 双 agent broker — 文件协议（turn 文件 + done 标记）
+- [x] broker 停止条件（keyword / duplicate / max-rounds / timeout / session-exit）
+- [x] broker 模式下 watchdog 重启后自动重发 prompt
+- [x] Live test 通过（Codex + Claude 完成多轮讨论并 AGREED）
+
+## 下一阶段计划
+
+### Phase 3: 远程控制
+
+- [ ] 接 Telegram 作为第一版远程入口
+- [ ] 支持 status / start / stop / 查看最近 turn 摘要
+
+### Phase 4: 后台长任务编排
+
+- [ ] heartbeat / progress summary
+- [ ] 为"睡觉时自动跑任务"建立最小闭环
+
+## 与 OpenClaw 的关系
+
+借鉴了 OpenClaw 的进程控制思路（PTY adapter、supervisor watchdog、heartbeat 周期摘要），但不复用其平台结构（插件体系、多渠道接入、session/router）。
+
+`coco` 是一个围绕个人 agent 工作流定制的极简 runtime。

@@ -31,6 +31,10 @@ export type SessionEventHandler = (event: SessionEvent) => void;
 // ---------------------------------------------------------------------------
 
 export class PtySession {
+  private static readonly SUBMIT_DELAY_MS = 25;
+  private static readonly CLAUDE_PASTE_THRESHOLD = 300;
+  private static readonly CLAUDE_CHUNK_SIZE = 16;
+  private static readonly CLAUDE_CHUNK_DELAY_MS = 5;
   readonly id: string;
   readonly spec: AgentSpec;
 
@@ -45,6 +49,7 @@ export class PtySession {
   private _restartCount = 0;
   private listeners: SessionEventHandler[] = [];
   private logBuffer: string[] = [];
+  private sendQueue: Promise<void> = Promise.resolve();
   private static readonly MAX_LOG_LINES = 2000;
 
   constructor(spec: AgentSpec, id?: string) {
@@ -97,14 +102,18 @@ export class PtySession {
     }
 
     const gen = ++this._generation;
+    const termName = process.env.TERM && process.env.TERM !== "dumb" ? process.env.TERM : "xterm-256color";
     let pty: PtyHandle;
     try {
       pty = ptyMod.spawn(this.spec.command, this.spec.args ?? [], {
-        name: process.env.TERM ?? "xterm-256color",
+        name: termName,
         cols: 120,
         rows: 30,
         cwd: this.spec.cwd ?? process.cwd(),
-        env: process.env as Record<string, string>,
+        env: {
+          ...(process.env as Record<string, string>),
+          TERM: termName,
+        },
       });
     } catch (err) {
       this._status = "crashed";
@@ -118,6 +127,7 @@ export class PtySession {
     this._lastOutputAt = Date.now();
     this._status = "running";
     this._exitResolve = null;
+    this.sendQueue = Promise.resolve();
 
     this.emit({ type: "start", pid: pty.pid, ts: Date.now() });
 
@@ -144,14 +154,34 @@ export class PtySession {
 
   /** Write data to the agent's stdin. */
   write(data: string): void {
-    if (!this.pty) throw new Error(`Session ${this.id} is not running`);
-    this.pty.write(data);
-    this.emit({ type: "input", data, ts: Date.now() });
+    this.writeInternal(data, true);
   }
 
   /** Send data + Enter key. */
   send(text: string): void {
-    this.write(text + "\r");
+    if (!this.pty) throw new Error(`Session ${this.id} is not running`);
+    const generation = this._generation;
+    this.emit({ type: "input", data: text, ts: Date.now() });
+
+    this.sendQueue = this.sendQueue
+      .catch(() => {})
+      .then(async () => {
+        if (!this.canWrite(generation)) return;
+
+        if (this.shouldChunkSend(text)) {
+          await this.writeChunked(generation, text);
+        } else {
+          this.writeInternal(text, false);
+        }
+
+        if (!this.canWrite(generation)) return;
+
+        await this.wait(PtySession.SUBMIT_DELAY_MS);
+        if (!this.canWrite(generation)) return;
+
+        this.writeInternal("\r", false);
+        this.emit({ type: "input", data: "\r", ts: Date.now() });
+      });
   }
 
   /** Read the last N lines of captured output. */
@@ -194,6 +224,39 @@ export class PtySession {
   }
 
   // -- internals ------------------------------------------------------------
+
+  private writeInternal(data: string, emitInput: boolean): void {
+    if (!this.pty) throw new Error(`Session ${this.id} is not running`);
+    this.pty.write(data);
+    if (emitInput) {
+      this.emit({ type: "input", data, ts: Date.now() });
+    }
+  }
+
+  private shouldChunkSend(text: string): boolean {
+    const target = `${this.spec.name} ${this.spec.command}`.toLowerCase();
+    return target.includes("claude") && text.length >= PtySession.CLAUDE_PASTE_THRESHOLD;
+  }
+
+  private canWrite(generation: number): boolean {
+    return this._generation === generation && this._status === "running" && this.pty !== null;
+  }
+
+  private async writeChunked(generation: number, text: string): Promise<void> {
+    for (let i = 0; i < text.length; i += PtySession.CLAUDE_CHUNK_SIZE) {
+      if (!this.canWrite(generation)) return;
+      const chunk = text.slice(i, i + PtySession.CLAUDE_CHUNK_SIZE);
+      this.writeInternal(chunk, false);
+      await this.wait(PtySession.CLAUDE_CHUNK_DELAY_MS);
+    }
+  }
+
+  private async wait(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      timer.unref?.();
+    });
+  }
 
   private emit(event: SessionEvent) {
     for (const handler of this.listeners) {
