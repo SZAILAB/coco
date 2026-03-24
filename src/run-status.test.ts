@@ -59,6 +59,7 @@ describe("RunStatusWriter", () => {
     expect(status?.progressSummary?.text).toContain("Recent progress:");
     expect(status?.progressSummary?.text).toContain("Round 1 codex -> claude");
     expect(status?.recentTurns).toHaveLength(1);
+    expect(status?.heartbeat.count).toBe(0);
   });
 
   it("keeps only the last three turns in the summary and marks stopped runs", async () => {
@@ -84,5 +85,41 @@ describe("RunStatusWriter", () => {
     expect(status?.progressSummary?.text).toContain("Stopped (keyword) by claude.");
     expect(status?.progressSummary?.text).toContain("Final: AGREED");
     expect(status?.progressSummary?.text).not.toContain("Round 1 codex -> claude");
+  });
+
+  it("records periodic heartbeats without losing current progress context", async () => {
+    const paths = await makePaths("run-789");
+    const writer = new RunStatusWriter(paths, {
+      runId: "run-789",
+      task: "Wait for reviewer",
+      cwd: "/tmp/coco",
+      leftName: "codex",
+      rightName: "claude",
+    });
+
+    await writer.init();
+    await writer.forwarded({
+      from: "codex",
+      to: "claude",
+      round: 2,
+      text: "Updated proposal with capped retries.",
+    });
+    await writer.waitingForTurn({
+      agent: "claude",
+      round: 2,
+      turn: 2,
+      outputPath: "/tmp/coco/claude/turn-002.md",
+      donePath: "/tmp/coco/claude/turn-002.done",
+      resent: true,
+    });
+    await writer.heartbeat(60_000);
+
+    const status = await readLatestRunStatus(paths.brokerRoot, "run-789");
+    expect(status?.heartbeat.count).toBe(1);
+    expect(status?.heartbeat.intervalMs).toBe(60_000);
+    expect(status?.heartbeat.lastAt).toBeTruthy();
+    expect(status?.heartbeat.lastText).toContain("Still waiting for claude turn 2");
+    expect(status?.heartbeat.lastText).toContain("Latest forward: round 2 codex -> claude");
+    expect(status?.progressSummary?.text).toContain("Waiting for claude turn 2");
   });
 });

@@ -176,6 +176,7 @@ export type LastTurnSummary = {
   round: number;
   lastForward: RunStatus["lastForward"];
   progressSummary: RunStatus["progressSummary"];
+  heartbeat: RunStatus["heartbeat"];
   stopReason: string | null;
   stopBy: string | null;
 };
@@ -190,6 +191,7 @@ export async function lastTurn(runId?: string, cfg?: ControlConfig): Promise<Las
     round: status.round,
     lastForward: status.lastForward,
     progressSummary: status.progressSummary,
+    heartbeat: status.heartbeat,
     stopReason: status.stopReason,
     stopBy: status.stopBy,
   };

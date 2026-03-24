@@ -72,6 +72,11 @@ bot.command("status", async (ctx) => {
     lines.push(`Last: ${status.lastForward.from} -> ${status.lastForward.to}`);
     lines.push(`Preview: ${status.lastForward.preview}`);
   }
+  if (status.heartbeat.count > 0 && status.heartbeat.lastAt) {
+    lines.push(
+      `Heartbeat: #${status.heartbeat.count} at ${status.heartbeat.lastAt}`,
+    );
+  }
   if (status.progressSummary) {
     lines.push("Summary:");
     lines.push(status.progressSummary.text);
@@ -120,6 +125,10 @@ bot.command("last", async (ctx) => {
   if (summary.progressSummary) {
     lines.push("Summary:");
     lines.push(summary.progressSummary.text);
+  }
+
+  if (summary.heartbeat.count > 0 && summary.heartbeat.lastAt) {
+    lines.push(`Heartbeat: #${summary.heartbeat.count} at ${summary.heartbeat.lastAt}`);
   }
 
   if (summary.lastForward) {

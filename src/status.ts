@@ -35,6 +35,12 @@ async function main() {
     console.log(`Preview: ${status.lastForward.preview}`);
   }
 
+  if (status.heartbeat.count > 0 && status.heartbeat.lastAt) {
+    console.log(
+      `Heartbeat: #${status.heartbeat.count} at ${status.heartbeat.lastAt} (every ${Math.round(status.heartbeat.intervalMs / 1000)}s)`,
+    );
+  }
+
   if (status.progressSummary) {
     console.log("Summary:");
     console.log(status.progressSummary.text);

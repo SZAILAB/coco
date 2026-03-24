@@ -139,6 +139,7 @@ async function main() {
   const cwd = process.env.COCO_CWD ?? process.cwd();
   const startupTimeoutMs = Number.parseInt(process.env.COCO_STARTUP_TIMEOUT_MS ?? "15000", 10) || 15_000;
   const turnTimeoutMs = Number.parseInt(process.env.COCO_TURN_TIMEOUT_MS ?? "300000", 10) || 300_000;
+  const heartbeatMs = Math.max(0, Number.parseInt(process.env.COCO_HEARTBEAT_MS ?? "60000", 10) || 60_000);
   const brokerRoot = path.resolve(cwd, process.env.COCO_BROKER_STATE_DIR ?? "state/broker");
   const runId = crypto.randomUUID().slice(0, 8);
   const turnDir = path.join(brokerRoot, runId);
@@ -252,6 +253,7 @@ async function main() {
       console.log(`[broker] stopping (${reason}) after ${round} rounds, by ${by}: ${preview}`);
     },
   });
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   let shuttingDown = false;
   let shutdownCode = 0;
@@ -259,6 +261,10 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     shutdownCode = code;
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
     broker.stop();
     leftWatchdog.stop();
     rightWatchdog.stop();
@@ -300,6 +306,13 @@ async function main() {
   }
 
   await wait(500);
+
+  if (heartbeatMs > 0) {
+    heartbeatTimer = setInterval(() => {
+      void queueStatus(() => status.heartbeat(heartbeatMs));
+    }, heartbeatMs);
+    heartbeatTimer.unref?.();
+  }
 
   try {
     await broker.start();

@@ -25,6 +25,13 @@ export type ProgressSummary = {
   updatedAt: string;
 };
 
+export type HeartbeatSnapshot = {
+  intervalMs: number;
+  count: number;
+  lastAt: string | null;
+  lastText: string | null;
+};
+
 export type SessionSnapshot = {
   name: string;
   pid: number | null;
@@ -51,6 +58,7 @@ export type RunStatus = {
   lastForward: LastForward | null;
   recentTurns: LastForward[];
   progressSummary: ProgressSummary | null;
+  heartbeat: HeartbeatSnapshot;
   sessions: {
     left: SessionSnapshot;
     right: SessionSnapshot;
@@ -110,6 +118,12 @@ export class RunStatusWriter {
       lastForward: null,
       recentTurns: [],
       progressSummary: null,
+      heartbeat: {
+        intervalMs: 0,
+        count: 0,
+        lastAt: null,
+        lastText: null,
+      },
       sessions: {
         left: { name: init.leftName, pid: null, status: "starting" },
         right: { name: init.rightName, pid: null, status: "starting" },
@@ -183,6 +197,20 @@ export class RunStatusWriter {
     this.status.lastForward = forward;
     this.status.recentTurns = [...this.status.recentTurns, forward].slice(-3);
     this.refreshSummary(forward.at);
+    await this.flush();
+  }
+
+  async heartbeat(intervalMs: number): Promise<void> {
+    if (this.status.phase === "stopped") return;
+
+    const now = new Date().toISOString();
+    this.status.heartbeat = {
+      intervalMs,
+      count: this.status.heartbeat.count + 1,
+      lastAt: now,
+      lastText: buildHeartbeatText(this.status),
+    };
+    this.refreshSummary(now);
     await this.flush();
   }
 
@@ -306,6 +334,39 @@ function buildProgressSummary(status: RunStatus): string {
       lines.push(`- Round ${turn.round} ${turn.from} -> ${turn.to}: ${turn.preview}`);
     }
   } else if (status.phase !== "stopped") {
+    lines.push("No turns forwarded yet.");
+  }
+
+  return lines.join("\n");
+}
+
+function buildHeartbeatText(status: RunStatus): string {
+  const lines: string[] = [];
+
+  const exited =
+    status.sessions.left.status === "exited"
+      ? status.sessions.left
+      : status.sessions.right.status === "exited"
+        ? status.sessions.right
+        : null;
+
+  if (exited) {
+    lines.push(`Still waiting for watchdog to recover ${exited.name}.`);
+  } else if (status.waitingFor) {
+    lines.push(
+      `Still waiting for ${status.waitingFor.agent} turn ${status.waitingFor.turn} (round ${status.waitingFor.round}, resends ${status.waitingFor.resentCount}).`,
+    );
+  } else if (status.phase === "starting") {
+    lines.push("Broker is still starting.");
+  } else {
+    lines.push("Broker is still running.");
+  }
+
+  if (status.lastForward) {
+    lines.push(
+      `Latest forward: round ${status.lastForward.round} ${status.lastForward.from} -> ${status.lastForward.to}: ${status.lastForward.preview}`,
+    );
+  } else {
     lines.push("No turns forwarded yet.");
   }
 
