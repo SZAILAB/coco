@@ -12,10 +12,11 @@
 
 ## 当前状态
 
-项目已经完成了两个阶段：
+项目已经完成了三个阶段中的前两阶段，并落下了 Phase 3 的第一版远程入口：
 
 - **Phase 1：单会话 runtime** — 已通过真机 smoke test（启动、输入输出、异常重启、退出日志完整性）
 - **Phase 2：双 agent broker** — 已通过 live test（Codex 和 Claude 完成文件协议 roundtrip 并达成 AGREED）
+- **Phase 3：远程控制（Telegram v1）** — 已接入最小命令面（`/run`、`/status`、`/stop`、`/last`）
 
 ## 核心架构
 
@@ -100,6 +101,15 @@ PTY output 仍然进 JSONL transcript，用于调试和故障排查。
 
 `npm run status` 会读取最新 run 的 `status.json` 并打印当前状态。
 
+`src/control.ts` 在这个状态面之上提供了一个很薄的本地控制 API：
+
+- `startBroker(task)`
+- `readStatus(runId?)`
+- `stopBroker(runId?)`
+- `lastTurn(runId?)`
+
+`src/telegram.ts` 只是把这些 API 暴露到 Telegram 命令上，不再重复实现 run 管理。
+
 ### JSONL Transcript
 
 `src/transcript.ts` 记录所有会话事件到 `logs/<session-id>.jsonl`：
@@ -120,6 +130,8 @@ coco/
     run-broker.ts      # 双 agent broker 入口
     status.ts          # 读取并打印最新 run 状态
     run-status.ts      # status.json / latest-run.json 写入
+    control.ts         # 本地控制 API（start/status/stop/last）
+    telegram.ts        # Telegram 命令入口
     pty-session.ts     # PTY 封装
     broker.ts          # 文件协议 broker
     watchdog.ts        # 自动重启
@@ -182,6 +194,24 @@ npm run status
 
 如果你用 `nohup npm run broker -- "任务" &` 后台运行，`broker.pid` 和 `status.json` 就是最小控制面。
 
+### Telegram 模式
+
+先准备一个 Telegram bot token，并把允许访问的用户名放进 `COCO_TELEGRAM_USERS`：
+
+```bash
+COCO_TELEGRAM_TOKEN=xxx \
+COCO_TELEGRAM_USERS=your_username \
+npm run telegram
+```
+
+当前支持的命令：
+
+- `/run <task>`：后台启动一个 broker run
+- `/status [runId]`：查看最新或指定 run 的状态
+- `/stop [runId]`：停止最新或指定 run
+- `/last [runId]`：查看最近一次转发摘要
+- `/help`
+
 ## 技术栈
 
 - Node.js 22+、TypeScript、`tsx`
@@ -200,15 +230,19 @@ npm run status
 - [x] broker 停止条件（keyword / duplicate / max-rounds / timeout / session-exit）
 - [x] broker 模式下 watchdog 重启后自动重发 prompt
 - [x] 最小控制平面（status.json / latest-run.json / broker.pid）
+- [x] 本地控制 API（startBroker / readStatus / stopBroker / lastTurn）
+- [x] Telegram v1（/run /status /stop /last）
 - [x] Live test 通过（Codex + Claude 完成文件协议 roundtrip 并达成 AGREED）
 
 ## 下一阶段计划
 
 ### Phase 3: 远程控制
 
-- [ ] 接 Telegram 作为第一版远程入口
-- [ ] 复用现有 status 面，暴露远程 `status`
-- [ ] 暴露远程 `stop` / 最近 turn 摘要
+- [x] 接 Telegram 作为第一版远程入口
+- [x] 复用现有 status 面，暴露远程 `status`
+- [x] 暴露远程 `stop` / 最近 turn 摘要
+- [ ] 补 Telegram 命令层的自动化测试
+- [ ] 增加更稳的鉴权策略（目前是基于 username 的 allowlist）
 
 ### Phase 4: 后台长任务编排
 

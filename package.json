@@ -7,15 +7,17 @@
     "dev": "tsx src/index.ts",
     "postinstall": "node scripts/fix-node-pty-helper.mjs",
     "status": "tsx src/status.ts",
+    "telegram": "tsx src/telegram.ts",
     "test": "vitest run"
   },
   "dependencies": {
+    "grammy": "^1.41.1",
     "node-pty": "^1.0.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^3.0.0"
   }
 }
