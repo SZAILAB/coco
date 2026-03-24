@@ -158,6 +158,38 @@ describe("Broker", () => {
     expect(stops).toEqual(["session-exit:codex"]);
   });
 
+  it("re-sends the current turn prompt after a watchdog restart", async () => {
+    const left = new FakeSession("left", "codex");
+    const right = new FakeSession("right", "claude");
+    const turnDir = await makeTurnDir();
+    const stops: string[] = [];
+
+    const broker = new Broker(left, right, {
+      turnDir,
+      pollMs: 10,
+      turnTimeoutMs: 2_000,
+      onStop: ({ reason }) => stops.push(reason),
+    });
+
+    const run = broker.start();
+    await waitFor(() => left.sent.length === 1);
+    const firstPrompt = left.sent[0];
+
+    left.emit({ type: "exit", exitCode: 1, signal: null, ts: Date.now() });
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    left.emit({ type: "start", pid: 1234, ts: Date.now() });
+    await waitFor(() => left.sent.length === 2);
+
+    expect(left.sent[1]).toBe(firstPrompt);
+
+    await writeTurn(turnDir, "codex", 1, "Recovered proposal after restart.");
+    await waitFor(() => right.sent.length === 1);
+    await writeTurn(turnDir, "claude", 1, "AGREED");
+    await run;
+
+    expect(stops).toEqual(["keyword"]);
+  });
+
   it("writes turns into per-side numbered files", async () => {
     const left = new FakeSession("left", "codex");
     const right = new FakeSession("right", "claude");

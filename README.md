@@ -8,13 +8,14 @@
 - 让两个 agent 围绕一个任务自动讨论并达成结论
 - 在进程异常退出时自动恢复并继续对话
 - 为后续的远程控制、定时汇报打下一个足够稳的底座
+- 提供一个最小控制平面，能看当前 run 的状态和 pid
 
 ## 当前状态
 
 项目已经完成了两个阶段：
 
 - **Phase 1：单会话 runtime** — 已通过真机 smoke test（启动、输入输出、异常重启、退出日志完整性）
-- **Phase 2：双 agent broker** — 已通过 live test（Codex 和 Claude 通过文件协议完成多轮讨论并达成 AGREED）
+- **Phase 2：双 agent broker** — 已通过 live test（Codex 和 Claude 完成文件协议 roundtrip 并达成 AGREED）
 
 ## 核心架构
 
@@ -79,6 +80,26 @@ PTY output 仍然进 JSONL transcript，用于调试和故障排查。
 - session exit 不会立即终止 broker，给 watchdog 时间恢复
 - turn 超时兜底（默认 5 分钟）
 
+### 最小控制平面
+
+`run-broker` 会持续写入：
+
+- `state/broker/<run-id>/status.json`
+- `state/broker/<run-id>/broker.pid`
+- `state/broker/latest-run.json`
+
+`status.json` 至少包含：
+
+- `runId`
+- `phase`
+- `round`
+- `updatedAt`
+- `stopReason`
+- 当前等待中的 turn 信息
+- 左右 session 的 pid/status
+
+`npm run status` 会读取最新 run 的 `status.json` 并打印当前状态。
+
 ### JSONL Transcript
 
 `src/transcript.ts` 记录所有会话事件到 `logs/<session-id>.jsonl`：
@@ -97,6 +118,8 @@ coco/
   src/
     index.ts           # 单会话入口
     run-broker.ts      # 双 agent broker 入口
+    status.ts          # 读取并打印最新 run 状态
+    run-status.ts      # status.json / latest-run.json 写入
     pty-session.ts     # PTY 封装
     broker.ts          # 文件协议 broker
     watchdog.ts        # 自动重启
@@ -151,6 +174,14 @@ npm run broker -- "讨论任务"
 
 Turn 文件写入 `state/broker/<run-id>/`，transcript 写入 `logs/`。
 
+查看最新 broker run 的状态：
+
+```bash
+npm run status
+```
+
+如果你用 `nohup npm run broker -- "任务" &` 后台运行，`broker.pid` 和 `status.json` 就是最小控制面。
+
 ## 技术栈
 
 - Node.js 22+、TypeScript、`tsx`
@@ -168,6 +199,7 @@ Turn 文件写入 `state/broker/<run-id>/`，transcript 写入 `logs/`。
 - [x] 双 agent broker — 文件协议（turn 文件 + done 标记）
 - [x] broker 停止条件（keyword / duplicate / max-rounds / timeout / session-exit）
 - [x] broker 模式下 watchdog 重启后自动重发 prompt
+- [x] 最小控制平面（status.json / latest-run.json / broker.pid）
 - [x] Live test 通过（Codex + Claude 完成文件协议 roundtrip 并达成 AGREED）
 
 ## 下一阶段计划
@@ -175,7 +207,8 @@ Turn 文件写入 `state/broker/<run-id>/`，transcript 写入 `logs/`。
 ### Phase 3: 远程控制
 
 - [ ] 接 Telegram 作为第一版远程入口
-- [ ] 支持 status / start / stop / 查看最近 turn 摘要
+- [ ] 复用现有 status 面，暴露远程 `status`
+- [ ] 暴露远程 `stop` / 最近 turn 摘要
 
 ### Phase 4: 后台长任务编排
 

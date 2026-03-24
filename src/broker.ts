@@ -37,6 +37,14 @@ export type BrokerOptions = {
   stopWords?: string[];
   buildInitialMessage?: (ctx: InitialTurnContext) => string;
   renderMessage?: (from: string, text: string, ctx: TurnContext) => string;
+  onAwaitTurn?: (event: {
+    by: string;
+    round: number;
+    turn: number;
+    outputPath: string;
+    donePath: string;
+    resent: boolean;
+  }) => void;
   onForward?: (event: { from: string; to: string; round: number; text: string }) => void;
   onStop?: (event: { reason: BrokerStopReason; by: string; round: number; text: string }) => void;
 };
@@ -106,6 +114,7 @@ export class Broker {
         opts.renderMessage ??
         ((from, text, ctx) =>
           defaultForwardMessage(from, text, ctx.outputPath, ctx.donePath)),
+      onAwaitTurn: opts.onAwaitTurn ?? (() => {}),
       onForward: opts.onForward ?? (() => {}),
       onStop: opts.onStop ?? (() => {}),
     };
@@ -140,6 +149,14 @@ export class Broker {
     });
     this.send(this.left.session, initialMessage);
     firstRequest.lastPrompt = initialMessage;
+    this.opts.onAwaitTurn({
+      by: this.left.name,
+      round: 0,
+      turn: firstRequest.turn,
+      outputPath: firstRequest.outputPath,
+      donePath: firstRequest.donePath,
+      resent: false,
+    });
 
     let request: TurnRequest | null = firstRequest;
 
@@ -178,6 +195,14 @@ export class Broker {
       });
       this.send(target.session, message);
       nextRequest.lastPrompt = message;
+      this.opts.onAwaitTurn({
+        by: target.name,
+        round: this.rounds,
+        turn: nextRequest.turn,
+        outputPath: nextRequest.outputPath,
+        donePath: nextRequest.donePath,
+        resent: false,
+      });
       this.opts.onForward({ from: request.side.name, to: target.name, round: this.rounds, text });
 
       request = nextRequest;
@@ -245,6 +270,14 @@ export class Broker {
         wasExited = false;
         if (request.lastPrompt) {
           this.send(request.side.session, request.lastPrompt);
+          this.opts.onAwaitTurn({
+            by: request.side.name,
+            round: this.rounds,
+            turn: request.turn,
+            outputPath: request.outputPath,
+            donePath: request.donePath,
+            resent: true,
+          });
         }
       }
 

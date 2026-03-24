@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { Broker } from "./broker.js";
 import { PtySession, type AgentSpec } from "./pty-session.js";
+import { RunStatusWriter } from "./run-status.js";
 import { attachTranscript } from "./transcript.js";
 import { Watchdog } from "./watchdog.js";
 
@@ -141,6 +142,9 @@ async function main() {
   const brokerRoot = path.resolve(cwd, process.env.COCO_BROKER_STATE_DIR ?? "state/broker");
   const runId = crypto.randomUUID().slice(0, 8);
   const turnDir = path.join(brokerRoot, runId);
+  const pidFile = path.join(turnDir, "broker.pid");
+  const statusFile = path.join(turnDir, "status.json");
+  const latestFile = path.join(brokerRoot, "latest-run.json");
 
   const left: AgentSpec = {
     name: process.env.COCO_LEFT_NAME ?? "codex",
@@ -161,8 +165,42 @@ async function main() {
   console.log(`[broker] Task: ${task}`);
   console.log(`[broker] Turn dir: ${turnDir}`);
 
+  const status = new RunStatusWriter(
+    { brokerRoot, turnDir, pidFile, statusFile, latestFile },
+    {
+      runId,
+      task,
+      cwd,
+      leftName: left.name,
+      rightName: right.name,
+    },
+  );
+  await status.init();
+  let statusQueue: Promise<void> = Promise.resolve();
+  const queueStatus = (fn: () => Promise<void>) => {
+    statusQueue = statusQueue.then(fn).catch((err) => {
+      console.error("[broker] Status update failed:", err);
+    });
+    return statusQueue;
+  };
+
   const leftSession = new PtySession(left);
   const rightSession = new PtySession(right);
+
+  leftSession.onEvent((event) => {
+    if (event.type === "start") {
+      void queueStatus(() => status.sessionStarted("left", event.pid));
+    } else if (event.type === "exit") {
+      void queueStatus(() => status.sessionExited("left"));
+    }
+  });
+  rightSession.onEvent((event) => {
+    if (event.type === "start") {
+      void queueStatus(() => status.sessionStarted("right", event.pid));
+    } else if (event.type === "exit") {
+      void queueStatus(() => status.sessionExited("right"));
+    }
+  });
 
   const leftTranscript = attachTranscript(leftSession, "./logs");
   const rightTranscript = attachTranscript(rightSession, "./logs");
@@ -182,6 +220,18 @@ async function main() {
     turnDir,
     turnTimeoutMs,
     buildInitialMessage: ({ outputPath, donePath }) => buildWriterPrompt(task, outputPath, donePath),
+    onAwaitTurn: ({ by, round, turn, outputPath, donePath, resent }) => {
+      void queueStatus(() =>
+        status.waitingForTurn({
+          agent: by,
+          round,
+          turn,
+          outputPath,
+          donePath,
+          resent,
+        }),
+      );
+    },
     renderMessage: (from, text, ctx) => {
       if (ctx.to === right.name) {
         if (ctx.round === 1) {
@@ -192,10 +242,12 @@ async function main() {
       return buildWriterFollowup(from, text, ctx.outputPath, ctx.donePath);
     },
     onForward: ({ from, to, round, text }) => {
+      void queueStatus(() => status.forwarded({ from, to, round, text }));
       const preview = text.replace(/\s+/g, " ").slice(0, 120);
       console.log(`[broker] round ${round}: ${from} -> ${to}: ${preview}`);
     },
     onStop: ({ reason, by, round, text }) => {
+      void queueStatus(() => status.stopped({ reason, by, text }));
       const preview = text.replace(/\s+/g, " ").slice(0, 120);
       console.log(`[broker] stopping (${reason}) after ${round} rounds, by ${by}: ${preview}`);
     },
@@ -203,22 +255,36 @@ async function main() {
 
   let shuttingDown = false;
   let shutdownCode = 0;
-  const shutdown = async (code = 0) => {
+  const shutdown = async (code = 0, reason?: "interrupted" | "fatal") => {
     if (shuttingDown) return;
     shuttingDown = true;
     shutdownCode = code;
     broker.stop();
     leftWatchdog.stop();
     rightWatchdog.stop();
+    if (reason) {
+      await queueStatus(() =>
+        status.ensureStopped({
+          reason,
+          by: "system",
+          text: reason === "interrupted" ? "broker interrupted by signal" : "broker stopped after fatal error",
+        }),
+      );
+    }
+    await statusQueue;
+    await status.drain();
     await Promise.all([leftSession.stop(), rightSession.stop()]);
+    // Session exit handlers can enqueue one last status write after stop().
+    await statusQueue;
+    await status.drain();
     leftTranscript.detach();
     rightTranscript.detach();
     await Promise.all([leftTranscript.transcript.close(), rightTranscript.transcript.close()]);
     process.exit(shutdownCode);
   };
 
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void shutdown(0, "interrupted"));
+  process.on("SIGTERM", () => void shutdown(0, "interrupted"));
 
   leftWatchdog.start();
   rightWatchdog.start();
@@ -229,7 +295,7 @@ async function main() {
     await Promise.all([waitForReady(leftSession, startupTimeoutMs), waitForReady(rightSession, startupTimeoutMs)]);
   } catch (err) {
     console.error("[broker] Startup failed:", err);
-    await shutdown(1);
+    await shutdown(1, "fatal");
     return;
   }
 
@@ -240,7 +306,7 @@ async function main() {
     await shutdown();
   } catch (err) {
     console.error("[broker] Fatal:", err);
-    await shutdown(1);
+    await shutdown(1, "fatal");
   }
 }
 

@@ -6,6 +6,7 @@
     "broker": "tsx src/run-broker.ts",
     "dev": "tsx src/index.ts",
     "postinstall": "node scripts/fix-node-pty-helper.mjs",
+    "status": "tsx src/status.ts",
     "test": "vitest run"
   },
   "dependencies": {
