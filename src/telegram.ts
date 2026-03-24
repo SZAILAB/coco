@@ -1,6 +1,16 @@
 import { Bot } from "grammy";
+import path from "node:path";
 import { defaultControlConfig, lastTurn, readStatus, startBroker, stopBroker } from "./control.js";
 import { collectStatusNotifications, createNotificationCursor } from "./telegram-notify.js";
+import {
+  createTelegramStatePaths,
+  loadTelegramNotifierState,
+  loadTelegramSubscribers,
+  saveTelegramNotifierState,
+  saveTelegramSubscribers,
+  type TelegramNotifierState,
+  type TelegramSubscription,
+} from "./telegram-state.js";
 
 // ---------------------------------------------------------------------------
 // Telegram bot — thin shell over control.ts
@@ -19,8 +29,11 @@ const allowedUserIds = (process.env.COCO_TELEGRAM_USERS ?? "")
   .filter((n) => Number.isFinite(n) && n > 0);
 
 const cfg = defaultControlConfig();
+const telegramState = createTelegramStatePaths(
+  path.resolve(cfg.cwd, process.env.COCO_TELEGRAM_STATE_DIR ?? "state/telegram"),
+);
 const bot = new Bot(token);
-const subscribers = new Set<number>();
+const subscriptions = new Map<number, TelegramSubscription>();
 const notifyPollMs = Math.max(
   0,
   Number.parseInt(process.env.COCO_TELEGRAM_NOTIFY_POLL_MS ?? "5000", 10) || 5_000,
@@ -29,14 +42,68 @@ const notifyPollMs = Math.max(
 // Auth guard — checks from.id against allowlist
 bot.use(async (ctx, next) => {
   const userId = ctx.from?.id;
-  if (allowedUserIds.length > 0 && (!userId || !allowedUserIds.includes(userId))) {
+  if (!isAllowedUserId(userId)) {
     await ctx.reply("Not authorized.");
     return;
   }
-  if (ctx.chat?.id) {
-    subscribers.add(ctx.chat.id);
-  }
   await next();
+});
+
+// /subscribe
+bot.command("subscribe", async (ctx) => {
+  const subscription = getContextSubscription(ctx.chat?.id, ctx.from?.id);
+  if (!subscription) {
+    await ctx.reply("This chat cannot subscribe to notifications.");
+    return;
+  }
+
+  const existed = subscriptions.has(subscription.chatId);
+  subscriptions.set(subscription.chatId, subscription);
+  await persistSubscriptions();
+
+  await ctx.reply(
+    existed
+      ? `Notifications were already enabled for chat ${subscription.chatId}.`
+      : `Notifications enabled for chat ${subscription.chatId}.`,
+  );
+});
+
+// /unsubscribe
+bot.command("unsubscribe", async (ctx) => {
+  const chatId = ctx.chat?.id;
+  if (!chatId) {
+    await ctx.reply("This chat cannot unsubscribe.");
+    return;
+  }
+
+  const removed = subscriptions.delete(chatId);
+  if (removed) {
+    await persistSubscriptions();
+  }
+
+  await ctx.reply(
+    removed
+      ? `Notifications disabled for chat ${chatId}.`
+      : `Chat ${chatId} was not subscribed.`,
+  );
+});
+
+// /subscribers
+bot.command("subscribers", async (ctx) => {
+  const lines = [
+    `Subscribers: ${subscriptions.size}`,
+  ];
+
+  if (subscriptions.size === 0) {
+    lines.push("No chats are subscribed.");
+  } else {
+    for (const subscription of [...subscriptions.values()].sort((a, b) => a.chatId - b.chatId)) {
+      const state = isAllowedUserId(subscription.userId) ? "active" : "blocked";
+      lines.push(`- chat ${subscription.chatId} (user ${subscription.userId}, ${state})`);
+    }
+  }
+
+  await ctx.reply(lines.join("\n"));
 });
 
 // /run <task>
@@ -163,36 +230,46 @@ bot.command("help", async (ctx) => {
       "/status - Show current run status",
       "/stop - Stop the running broker",
       "/last - Show last forwarded turn",
+      "/subscribe - Enable proactive notifications for this chat",
+      "/unsubscribe - Disable proactive notifications for this chat",
+      "/subscribers - List subscribed chats",
       "/help - This message",
     ].join("\n"),
   );
 });
 
 // Start
+const notifierState = await loadPersistedState();
 console.log("[telegram] Starting bot...");
-startNotifier();
+startNotifier(notifierState);
 bot.start({
   onStart: () => console.log("[telegram] Bot is running"),
 });
 
-function startNotifier(): void {
+function startNotifier(initialState: TelegramNotifierState): void {
   if (notifyPollMs <= 0) return;
 
-  let seeded = false;
-  let cursor = createNotificationCursor();
+  let seeded = initialState.seeded;
+  let cursor = initialState.cursor ?? createNotificationCursor();
   let polling = false;
 
   const poll = async () => {
-    if (polling || subscribers.size === 0) return;
+    if (polling || subscriptions.size === 0) return;
     polling = true;
     try {
+      const previousCursor = JSON.stringify(cursor);
       const status = await readStatus(undefined, cfg);
       const result = collectStatusNotifications(cursor, status);
       cursor = result.cursor;
 
       if (!seeded) {
         seeded = true;
+        await saveTelegramNotifierState(telegramState, { seeded, cursor });
         return;
+      }
+
+      if (previousCursor !== JSON.stringify(cursor)) {
+        await saveTelegramNotifierState(telegramState, { seeded, cursor });
       }
 
       for (const notification of result.notifications) {
@@ -212,11 +289,42 @@ function startNotifier(): void {
 }
 
 async function broadcast(text: string): Promise<void> {
-  for (const chatId of subscribers) {
+  for (const subscription of subscriptions.values()) {
+    if (!isAllowedUserId(subscription.userId)) continue;
     try {
-      await bot.api.sendMessage(chatId, text);
+      await bot.api.sendMessage(subscription.chatId, text);
     } catch (err) {
-      console.error(`[telegram] Failed to notify chat ${chatId}:`, err);
+      console.error(`[telegram] Failed to notify chat ${subscription.chatId}:`, err);
     }
   }
+}
+
+async function loadPersistedState(): Promise<TelegramNotifierState> {
+  const [storedSubscriptions, storedNotifier] = await Promise.all([
+    loadTelegramSubscribers(telegramState),
+    loadTelegramNotifierState(telegramState),
+  ]);
+
+  subscriptions.clear();
+  for (const subscription of storedSubscriptions) {
+    subscriptions.set(subscription.chatId, subscription);
+  }
+
+  return storedNotifier;
+}
+
+async function persistSubscriptions(): Promise<void> {
+  await saveTelegramSubscribers(telegramState, [...subscriptions.values()]);
+}
+
+function getContextSubscription(
+  chatId: number | undefined,
+  userId: number | undefined,
+): TelegramSubscription | null {
+  if (!chatId || !userId) return null;
+  return { chatId, userId };
+}
+
+function isAllowedUserId(userId: number | undefined): boolean {
+  return allowedUserIds.length === 0 || (!!userId && allowedUserIds.includes(userId));
 }

@@ -128,6 +128,13 @@ PTY output 仍然进 JSONL transcript，用于调试和故障排查。
 
 `src/telegram.ts` 只是把这些 API 暴露到 Telegram 命令上，不再重复实现 run 管理。
 
+Telegram 的订阅和通知 cursor 会持久化到 `state/telegram/`：
+
+- `subscribers.json`：已订阅 chat 列表
+- `notifier.json`：通知 cursor 和 seeded 状态
+
+这样 bot 重启后不会丢掉订阅，也不会把旧的 progress / stop 通知重复推一遍。
+
 ### JSONL Transcript
 
 `src/transcript.ts` 记录所有会话事件到 `logs/<session-id>.jsonl`：
@@ -150,6 +157,7 @@ coco/
     run-status.ts      # status.json / latest-run.json 写入
     control.ts         # 本地控制 API（start/status/stop/last）
     telegram.ts        # Telegram 命令入口
+    telegram-state.ts  # Telegram 订阅和 notifier 状态持久化
     pty-session.ts     # PTY 封装
     broker.ts          # 文件协议 broker
     watchdog.ts        # 自动重启
@@ -158,6 +166,7 @@ coco/
     *.test.ts          # 测试
   logs/                # transcript 输出
   state/broker/        # broker turn 文件
+  state/telegram/      # Telegram 订阅和 notifier 状态
 ```
 
 ## 运行方式
@@ -236,15 +245,20 @@ npm run telegram
 - `/status [runId]`：查看最新或指定 run 的状态
 - `/stop [runId]`：停止最新或指定 run
 - `/last [runId]`：查看最近一次转发摘要
+- `/subscribe`：为当前 chat 开启主动通知
+- `/unsubscribe`：为当前 chat 关闭主动通知
+- `/subscribers`：查看当前已订阅 chat 列表
 - `/help`
 
 `/status` 和 `/last` 都会带上 `progressSummary`，方便在手机上快速看进度，而不是只看原始状态字段。
 
-只要你已经和 bot 交互过并进入了订阅列表，Telegram 还会主动推送：
+只要当前 chat 已通过 `/subscribe` 进入订阅列表，Telegram 还会主动推送：
 
 - 新的 turn forward
 - watchdog 恢复相关事件（session exit / resend）
 - run 停止（`AGREED` / `BLOCKED` / `timeout` / `fatal` / 手动中断）
+
+订阅列表和通知 cursor 都会写进 `state/telegram/`，因此 bot 重启后依然能继续推送，而且不会把旧通知重复发一遍。
 
 Telegram 主动通知轮询默认是 5 秒，可通过 `COCO_TELEGRAM_NOTIFY_POLL_MS` 调整；设为 `0` 可关闭。
 
@@ -268,6 +282,7 @@ Telegram 主动通知轮询默认是 5 秒，可通过 `COCO_TELEGRAM_NOTIFY_POL
 - [x] 最小控制平面（status.json / latest-run.json / broker.pid）
 - [x] 本地控制 API（startBroker / readStatus / stopBroker / lastTurn）
 - [x] Telegram v1（/run /status /stop /last）
+- [x] Telegram 订阅持久化（subscribers.json / notifier.json）
 - [x] Telegram 主动通知（forward / recovery / stop）
 - [x] 进度摘要（recentTurns / progressSummary）
 - [x] heartbeat（周期刷新 status.json，标记 run 仍然存活）
@@ -280,6 +295,7 @@ Telegram 主动通知轮询默认是 5 秒，可通过 `COCO_TELEGRAM_NOTIFY_POL
 - [x] 接 Telegram 作为第一版远程入口
 - [x] 复用现有 status 面，暴露远程 `status`
 - [x] 暴露远程 `stop` / 最近 turn 摘要
+- [x] 持久化 Telegram 订阅列表和通知 cursor
 - [ ] 补 Telegram 命令层的自动化测试
 - [x] 将 Telegram 鉴权从 username allowlist 升级为 numeric user ID allowlist
 
