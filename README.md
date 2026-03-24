@@ -168,7 +168,7 @@ Turn 文件写入 `state/broker/<run-id>/`，transcript 写入 `logs/`。
 - [x] 双 agent broker — 文件协议（turn 文件 + done 标记）
 - [x] broker 停止条件（keyword / duplicate / max-rounds / timeout / session-exit）
 - [x] broker 模式下 watchdog 重启后自动重发 prompt
-- [x] Live test 通过（Codex + Claude 完成多轮讨论并 AGREED）
+- [x] Live test 通过（Codex + Claude 完成文件协议 roundtrip 并达成 AGREED）
 
 ## 下一阶段计划
 
