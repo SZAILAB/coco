@@ -1,4 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createInterface } from "node:readline";
 
 export type DirectAgent = "codex" | "claude";
@@ -24,6 +27,7 @@ export async function createDirectBinding(
   sessionId: string,
   cwd: string,
 ): Promise<DirectBinding> {
+  await assertSessionExists(agent, sessionId, cwd);
   if (agent === "codex") {
     return new CodexResumeBinding(sessionId, cwd);
   }
@@ -424,6 +428,7 @@ async function spawnClaudeResumeProcess(
         "stream-json",
         "--permission-prompt-tool",
         "stdio",
+        "--verbose",
         "--permission-mode",
         "bypassPermissions",
         "--resume",
@@ -481,4 +486,56 @@ function filterEnv(
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+async function assertSessionExists(
+  agent: DirectAgent,
+  sessionId: string,
+  cwd: string,
+): Promise<void> {
+  if (agent === "claude") {
+    if (!claudeSessionFileExists(cwd, sessionId)) {
+      throw new Error(`No Claude session found for id ${sessionId} in ${cwd}`);
+    }
+    return;
+  }
+
+  if (!codexSessionFileExists(sessionId)) {
+    throw new Error(`No Codex session transcript found for id ${sessionId}`);
+  }
+}
+
+function claudeSessionFileExists(cwd: string, sessionId: string): boolean {
+  const homeDir = os.homedir();
+  const absCwd = path.resolve(cwd);
+  const projectDir = path.join(
+    homeDir,
+    ".claude",
+    "projects",
+    absCwd.replaceAll("/", "-"),
+  );
+  return fs.existsSync(path.join(projectDir, `${sessionId}.jsonl`));
+}
+
+function codexSessionFileExists(sessionId: string): boolean {
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const sessionsDir = path.join(codexHome, "sessions");
+  if (!fs.existsSync(sessionsDir)) return false;
+
+  const stack = [sessionsDir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(entryPath);
+        continue;
+      }
+      if (entry.isFile() && entry.name.includes(sessionId) && entry.name.endsWith(".jsonl")) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
