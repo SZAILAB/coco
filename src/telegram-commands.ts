@@ -163,6 +163,7 @@ export function buildHelpText(): string {
     "/subscribe - Enable proactive notifications for this chat",
     "/unsubscribe - Disable proactive notifications for this chat",
     "/subscribers - List subscribed chats",
+    "/coco help - Direct session commands",
     "/help - This message",
   ].join("\n");
 }

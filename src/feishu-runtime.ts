@@ -1,4 +1,5 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
+import { createCocoCommandHandlers } from "./coco-commands.js";
 import {
   defaultControlConfig,
   lastTurn,
@@ -7,6 +8,7 @@ import {
   stopBroker,
   type ControlConfig,
 } from "./control.js";
+import { directSessions } from "./direct-session.js";
 import { createFeishuCommandHandlers } from "./feishu-commands.js";
 
 const MAX_TEXT_CHARS = 4000;
@@ -69,6 +71,16 @@ export async function startFeishuBot(env = readFeishuEnv()): Promise<void> {
       lastTurn,
     },
   });
+  const cocoHandlers = createCocoCommandHandlers({
+    deps: {
+      bind: (chatKey, agent, sessionId) => directSessions.bind(chatKey, agent, sessionId, env.cfg.cwd),
+      use: (chatKey, agent) => directSessions.use(chatKey, agent),
+      ask: (chatKey, agent, text) => directSessions.ask(chatKey, agent, text),
+      sendToActive: (chatKey, text) => directSessions.sendToActive(chatKey, text),
+      current: (chatKey) => directSessions.current(chatKey),
+      detach: (chatKey, agent) => directSessions.detach(chatKey, agent),
+    },
+  });
   const recentMessageIds = new Map<string, number>();
 
   const eventDispatcher = new Lark.EventDispatcher({}).register({
@@ -76,12 +88,26 @@ export async function startFeishuBot(env = readFeishuEnv()): Promise<void> {
       const inbound = extractInboundMessage(eventData, recentMessageIds);
       if (!inbound) return;
 
-      await handlers.handleMessage({
+      const message = {
         chatId: inbound.chatId,
         userId: inbound.userId,
         text: inbound.text,
         reply: async (text: string) => sendFeishuText(client, inbound.chatId, text),
-      });
+      };
+      const chatKey = buildFeishuChatKey(inbound.chatId);
+      if (!isAllowedFeishuMessage(env, inbound)) {
+        await message.reply("Not authorized.");
+        return;
+      }
+
+      if (await cocoHandlers.handleCocoCommand({ ...message, chatKey })) {
+        return;
+      }
+      if (await cocoHandlers.handlePlainText({ ...message, chatKey })) {
+        return;
+      }
+
+      await handlers.handleMessage(message);
     },
   });
 
@@ -276,4 +302,16 @@ function pruneRecentMessages(recentMessageIds: Map<string, number>, nowMs: numbe
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function buildFeishuChatKey(chatId: string): string {
+  return `feishu:${chatId}`;
+}
+
+function isAllowedFeishuMessage(env: FeishuEnv, message: FeishuInboundMessage): boolean {
+  const userAllowed =
+    env.allowedUserIds.length === 0 || env.allowedUserIds.includes(message.userId);
+  const chatAllowed =
+    env.allowedChatIds.length === 0 || env.allowedChatIds.includes(message.chatId);
+  return userAllowed && chatAllowed;
 }

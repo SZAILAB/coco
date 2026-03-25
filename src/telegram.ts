@@ -1,6 +1,8 @@
 import { Bot } from "grammy";
 import path from "node:path";
+import { createCocoCommandHandlers } from "./coco-commands.js";
 import { defaultControlConfig, lastTurn, readStatus, startBroker, stopBroker } from "./control.js";
+import { directSessions } from "./direct-session.js";
 import { collectStatusNotifications, createNotificationCursor } from "./telegram-notify.js";
 import { createTelegramCommandHandlers } from "./telegram-commands.js";
 import {
@@ -51,6 +53,16 @@ const handlers = createTelegramCommandHandlers({
     persistSubscriptions,
   },
 });
+const cocoHandlers = createCocoCommandHandlers({
+  deps: {
+    bind: (chatKey, agent, sessionId) => directSessions.bind(chatKey, agent, sessionId, cfg.cwd),
+    use: (chatKey, agent) => directSessions.use(chatKey, agent),
+    ask: (chatKey, agent, text) => directSessions.ask(chatKey, agent, text),
+    sendToActive: (chatKey, text) => directSessions.sendToActive(chatKey, text),
+    current: (chatKey) => directSessions.current(chatKey),
+    detach: (chatKey, agent) => directSessions.detach(chatKey, agent),
+  },
+});
 
 // Auth guard — checks from.id against allowlist
 bot.use((ctx, next) => handlers.authGuard(ctx, next));
@@ -78,6 +90,33 @@ bot.command("last", handlers.last);
 
 // /help
 bot.command("help", handlers.help);
+
+// /coco ...
+bot.command("coco", async (ctx) => {
+  await cocoHandlers.handleCocoCommand({
+    chatKey: buildTelegramChatKey(ctx.chat?.id),
+    text: ctx.msg.text,
+    reply: (text) => ctx.reply(text),
+  });
+});
+
+// Bound direct sessions receive any non-/coco message, including agent slash commands like /compact.
+bot.on("message:text", async (ctx, next) => {
+  const text = ctx.msg.text.trim();
+  if (isReservedTelegramCommand(text)) {
+    await next();
+    return;
+  }
+
+  const handled = await cocoHandlers.handlePlainText({
+    chatKey: buildTelegramChatKey(ctx.chat?.id),
+    text,
+    reply: (replyText) => ctx.reply(replyText),
+  });
+  if (!handled) {
+    await next();
+  }
+});
 
 // Start
 const notifierState = await loadPersistedState();
@@ -160,4 +199,28 @@ async function persistSubscriptions(): Promise<void> {
 
 function isAllowedBroadcastUserId(userId: number | undefined): boolean {
   return allowedUserIds.length === 0 || (!!userId && allowedUserIds.includes(userId));
+}
+
+function buildTelegramChatKey(chatId: number | undefined): string {
+  return `telegram:${chatId ?? "unknown"}`;
+}
+
+function isReservedTelegramCommand(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) return false;
+
+  const raw = trimmed.slice(1).split(/\s+/, 1)[0] ?? "";
+  const command = raw.split("@", 1)[0]?.toLowerCase() ?? "";
+  return (
+    command === "start" ||
+    command === "help" ||
+    command === "run" ||
+    command === "status" ||
+    command === "stop" ||
+    command === "last" ||
+    command === "subscribe" ||
+    command === "unsubscribe" ||
+    command === "subscribers" ||
+    command === "coco"
+  );
 }

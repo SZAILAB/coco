@@ -122,6 +122,7 @@ export function buildFeishuHelpText(): string {
     "/status [runId] - Show current run status",
     "/stop [runId] - Stop the running broker",
     "/last [runId] - Show last forwarded turn",
+    "/coco help - Direct session commands",
     "/help - This message",
   ].join("\n");
 }
