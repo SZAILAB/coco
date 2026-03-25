@@ -9,6 +9,7 @@ import {
 export type DirectBindingSnapshot = {
   agent: DirectAgent;
   sessionId: string;
+  cwd: string;
   status: DirectBindingStatus;
   error: string | null;
 };
@@ -86,6 +87,7 @@ export class DirectSessionManager {
       bindings[agent] = {
         agent,
         sessionId: binding.sessionId(),
+        cwd: binding.cwd(),
         status: binding.status(),
         error: binding.error(),
       };

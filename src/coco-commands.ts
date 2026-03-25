@@ -2,7 +2,7 @@ import type { DirectAgent, DirectSendResult } from "./direct-backend.js";
 import type { DirectChatState } from "./direct-session.js";
 
 export type CocoCommandDeps = {
-  bind(chatKey: string, agent: DirectAgent, sessionId: string): Promise<DirectChatState>;
+  bind(chatKey: string, agent: DirectAgent, sessionId: string, cwd: string): Promise<DirectChatState>;
   use(chatKey: string, agent: DirectAgent): DirectChatState;
   ask(chatKey: string, agent: DirectAgent, text: string): Promise<DirectSendResult>;
   sendToActive(chatKey: string, text: string): Promise<DirectSendResult | null>;
@@ -23,7 +23,7 @@ export type CocoCommandMessage = {
 type ParsedCocoCommand =
   | { name: "help" }
   | { name: "current" }
-  | { name: "bind"; agent: DirectAgent; sessionId: string }
+  | { name: "bind"; agent: DirectAgent; sessionId: string; cwd: string }
   | { name: "use"; agent: DirectAgent }
   | { name: "ask"; agent: DirectAgent; text: string }
   | { name: "detach"; agent?: DirectAgent };
@@ -45,10 +45,15 @@ export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
 
         case "bind": {
           try {
-            const state = await runtime.deps.bind(message.chatKey, parsed.agent, parsed.sessionId);
+            const state = await runtime.deps.bind(
+              message.chatKey,
+              parsed.agent,
+              parsed.sessionId,
+              parsed.cwd,
+            );
             await message.reply(
               [
-                `Bound ${parsed.agent} session ${parsed.sessionId}.`,
+                `Bound ${parsed.agent} session ${parsed.sessionId} in ${parsed.cwd}.`,
                 formatCurrentState(state),
               ].join("\n\n"),
             );
@@ -120,10 +125,11 @@ export function parseCocoCommand(text: string): ParsedCocoCommand | null {
     case "current":
       return { name: "current" };
     case "bind": {
-      const [agent, ...sessionParts] = rest.split(/\s+/);
-      const sessionId = sessionParts.join(" ").trim();
-      if (!isDirectAgent(agent) || !sessionId) return { name: "help" };
-      return { name: "bind", agent, sessionId };
+      const match = rest.match(/^(\S+)\s+(\S+)\s+(.+)$/);
+      if (!match) return { name: "help" };
+      const [, agent, sessionId, cwd] = match;
+      if (!isDirectAgent(agent) || !cwd.trim()) return { name: "help" };
+      return { name: "bind", agent, sessionId, cwd: cwd.trim() };
     }
     case "use": {
       if (!isDirectAgent(rest)) return { name: "help" };
@@ -148,8 +154,8 @@ export function parseCocoCommand(text: string): ParsedCocoCommand | null {
 export function buildCocoHelpText(): string {
   return [
     "coco session commands:",
-    "/coco bind codex <thread_id> - Bind a Codex session by thread ID",
-    "/coco bind claude <session_id> - Bind a Claude session by session ID",
+    "/coco bind codex <thread_id> <cwd> - Bind a Codex session in a specific workdir",
+    "/coco bind claude <session_id> <cwd> - Bind a Claude session in a specific workdir",
     "/coco use <codex|claude> - Set the default direct-chat target",
     "/coco ask <codex|claude> <text> - Send one message without switching target",
     "/coco current - Show current bindings and active target",
@@ -170,7 +176,7 @@ export function formatCurrentState(state: DirectChatState): string {
     const binding = state.bindings[agent];
     if (!binding) continue;
     hasBindings = true;
-    const parts = [`- ${agent}: ${binding.sessionId}`, `[${binding.status}]`];
+    const parts = [`- ${agent}: ${binding.sessionId}`, `cwd=${binding.cwd}`, `[${binding.status}]`];
     if (binding.error) {
       parts.push(`error=${binding.error}`);
     }

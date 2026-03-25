@@ -16,6 +16,7 @@ export type DirectSendResult = {
 export interface DirectBinding {
   readonly agent: DirectAgent;
   sessionId(): string;
+  cwd(): string;
   status(): DirectBindingStatus;
   error(): string | null;
   send(prompt: string): Promise<DirectSendResult>;
@@ -49,6 +50,10 @@ class CodexResumeBinding implements DirectBinding {
 
   sessionId(): string {
     return this.#sessionId;
+  }
+
+  cwd(): string {
+    return this.#cwd;
   }
 
   status(): DirectBindingStatus {
@@ -143,6 +148,10 @@ class ClaudeResumeBinding implements DirectBinding {
 
   sessionId(): string {
     return this.#sessionId;
+  }
+
+  cwd(): string {
+    return this.#cwd;
   }
 
   status(): DirectBindingStatus {

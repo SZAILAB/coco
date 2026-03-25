@@ -73,7 +73,7 @@ export async function startFeishuBot(env = readFeishuEnv()): Promise<void> {
   });
   const cocoHandlers = createCocoCommandHandlers({
     deps: {
-      bind: (chatKey, agent, sessionId) => directSessions.bind(chatKey, agent, sessionId, env.cfg.cwd),
+      bind: (chatKey, agent, sessionId, cwd) => directSessions.bind(chatKey, agent, sessionId, cwd),
       use: (chatKey, agent) => directSessions.use(chatKey, agent),
       ask: (chatKey, agent, text) => directSessions.ask(chatKey, agent, text),
       sendToActive: (chatKey, text) => directSessions.sendToActive(chatKey, text),

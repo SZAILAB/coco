@@ -2,13 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { DirectSessionManager } from "./direct-session.js";
 import type { DirectAgent, DirectBinding, DirectBindingStatus, DirectSendResult } from "./direct-backend.js";
 
-function createFakeBinding(agent: DirectAgent, sessionId: string): DirectBinding {
+function createFakeBinding(agent: DirectAgent, sessionId: string, cwd = "/tmp/project"): DirectBinding {
   let status: DirectBindingStatus = "ready";
   let error: string | null = null;
 
   return {
     agent,
     sessionId: () => sessionId,
+    cwd: () => cwd,
     status: () => status,
     error: () => error,
     async send(prompt: string): Promise<DirectSendResult> {
@@ -37,7 +38,9 @@ describe("direct session manager", () => {
 
     expect(state.activeTarget).toBe("claude");
     expect(state.bindings.codex?.sessionId).toBe("thread-1");
+    expect(state.bindings.codex?.cwd).toBe("/tmp/project");
     expect(state.bindings.claude?.sessionId).toBe("session-1");
+    expect(state.bindings.claude?.cwd).toBe("/tmp/project");
   });
 
   it("sends plain text to the active binding", async () => {
@@ -59,6 +62,7 @@ describe("direct session manager", () => {
     const manager = new DirectSessionManager(async (agent, sessionId) => ({
       agent,
       sessionId: () => sessionId,
+      cwd: () => "/tmp/project",
       status: () => "ready",
       error: () => null,
       send: async (prompt) => ({ agent, sessionId, text: prompt }),
@@ -76,5 +80,6 @@ describe("direct session manager", () => {
     expect(state.activeTarget).toBe("codex");
     expect(state.bindings.claude).toBeUndefined();
     expect(state.bindings.codex?.sessionId).toBe("thread-1");
+    expect(state.bindings.codex?.cwd).toBe("/tmp/project");
   });
 });

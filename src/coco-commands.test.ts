@@ -9,6 +9,7 @@ function makeState(overrides?: Partial<DirectChatState>): DirectChatState {
       codex: {
         agent: "codex",
         sessionId: "thread-1",
+        cwd: "/tmp/project",
         status: "ready",
         error: null,
       },
@@ -19,10 +20,17 @@ function makeState(overrides?: Partial<DirectChatState>): DirectChatState {
 
 describe("coco direct commands", () => {
   it("parses bind and ask commands", () => {
-    expect(parseCocoCommand("/coco bind codex thread-1")).toEqual({
+    expect(parseCocoCommand("/coco bind codex thread-1 /tmp/project")).toEqual({
       name: "bind",
       agent: "codex",
       sessionId: "thread-1",
+      cwd: "/tmp/project",
+    });
+    expect(parseCocoCommand("/coco bind claude session-1 /tmp/project with spaces")).toEqual({
+      name: "bind",
+      agent: "claude",
+      sessionId: "session-1",
+      cwd: "/tmp/project with spaces",
     });
     expect(parseCocoCommand("/coco ask claude review this")).toEqual({
       name: "ask",
@@ -46,13 +54,13 @@ describe("coco direct commands", () => {
 
     const handled = await handlers.handleCocoCommand({
       chatKey: "telegram:1001",
-      text: "/coco bind codex thread-1",
+      text: "/coco bind codex thread-1 /tmp/project",
       reply,
     });
 
     expect(handled).toBe(true);
     expect(reply).toHaveBeenCalledWith(
-      expect.stringContaining("Bound codex session thread-1."),
+      expect.stringContaining("Bound codex session thread-1 in /tmp/project."),
     );
   });
 
