@@ -46,12 +46,17 @@ function createHarness(options?: {
   allowedUserIds?: string[];
   allowedChatIds?: string[];
   readStatusResult?: RunStatus | null;
+  readStatusSequence?: Array<RunStatus | null>;
+  completionPollMs?: number;
+  completionTimeoutMs?: number;
 }) {
   const readStatusResult =
     options && "readStatusResult" in options ? options.readStatusResult : makeStatus();
   const deps = {
     startBroker: vi.fn(),
-    readStatus: vi.fn().mockResolvedValue(readStatusResult),
+    readStatus: options?.readStatusSequence
+      ? vi.fn().mockImplementation(async () => options.readStatusSequence?.shift() ?? null)
+      : vi.fn().mockResolvedValue(readStatusResult),
     stopBroker: vi.fn(),
     lastTurn: vi.fn(),
   };
@@ -61,6 +66,8 @@ function createHarness(options?: {
     allowedChatIds: options?.allowedChatIds ?? ["oc_123"],
     cfg,
     deps,
+    completionPollMs: options?.completionPollMs,
+    completionTimeoutMs: options?.completionTimeoutMs,
   });
 
   return { deps, handlers };
@@ -107,6 +114,38 @@ describe("feishu command handlers", () => {
 
     expect(deps.startBroker).toHaveBeenCalledWith("discuss task", cfg);
     expect(message.reply).toHaveBeenCalledWith("Broker started.\nPID: 999\nRun: run-999");
+  });
+
+  it("replies again when the run finishes", async () => {
+    vi.useFakeTimers();
+    const stopped = {
+      ...makeStatus(),
+      phase: "stopped" as const,
+      stopReason: "keyword" as const,
+      stopBy: "claude",
+      stopTextPreview: "AGREED",
+      progressSummary: {
+        text: "Stopped (keyword) by claude.\nFinal: AGREED",
+        updatedAt: "2026-03-24T00:00:15.000Z",
+      },
+    };
+    const { handlers, deps } = createHarness({
+      readStatusSequence: [makeStatus(), stopped],
+      completionPollMs: 100,
+      completionTimeoutMs: 1_000,
+    });
+    deps.startBroker.mockResolvedValue({ pid: 999, runId: "run-999" });
+    const message = makeMessage({ text: "/run discuss task" });
+
+    await handlers.handleMessage(message);
+    expect(message.reply).toHaveBeenNthCalledWith(1, "Broker started.\nPID: 999\nRun: run-999");
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(message.reply).toHaveBeenNthCalledWith(
+      2,
+      "Run run-123 completed.\n\nStopped (keyword) by claude.\nFinal: AGREED",
+    );
   });
 
   it("reports when no run exists", async () => {

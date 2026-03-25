@@ -110,4 +110,35 @@ describe("control", () => {
     await rejection;
     expect(child.unref).toHaveBeenCalledOnce();
   });
+
+  it("returns the broker pid from status instead of the launcher pid", async () => {
+    vi.useFakeTimers();
+    mocks.readLatestRunStatus
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        ...makeStatus(456),
+        task: "test task",
+        cwd: "/tmp/coco",
+        startedAt: "2026-03-25T00:00:00.500Z",
+      });
+
+    const child = {
+      pid: 123,
+      unref: vi.fn(),
+      on: vi.fn(() => child),
+    };
+    mocks.spawn.mockReturnValue(child);
+    vi.setSystemTime(new Date("2026-03-25T00:00:00.000Z"));
+
+    const startPromise = startBroker("test task", {
+      cwd: "/tmp/coco",
+      brokerRoot: "/tmp/coco/state/broker",
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    await expect(startPromise).resolves.toEqual({
+      pid: 456,
+      runId: "run-123",
+    });
+  });
 });

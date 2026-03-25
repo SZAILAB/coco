@@ -33,6 +33,7 @@ export type StartResult = {
 
 export async function startBroker(task: string, cfg?: ControlConfig): Promise<StartResult> {
   const { cwd, brokerRoot } = cfg ?? defaultControlConfig();
+  const launchedAtMs = Date.now();
 
   // Check for an already-active run
   const existing = await readStatus(undefined, cfg);
@@ -73,6 +74,7 @@ export async function startBroker(task: string, cfg?: ControlConfig): Promise<St
   child.unref();
 
   const pid = child.pid ?? -1;
+  let resolvedPid = pid;
 
   // Wait briefly for status.json to appear so we can read runId
   let runId: string | null = null;
@@ -81,12 +83,11 @@ export async function startBroker(task: string, cfg?: ControlConfig): Promise<St
     if (spawnState.error) {
       throw new Error(`Broker spawn failed: ${spawnState.error}`);
     }
-    if (pid > 0) {
-      const status = await readLatestRunStatus(brokerRoot);
-      if (status && status.pid === pid) {
-        runId = status.runId;
-        break;
-      }
+    const status = await readLatestRunStatus(brokerRoot);
+    if (matchesStartedRun(status, task, cwd, launchedAtMs)) {
+      runId = status.runId;
+      resolvedPid = status.pid;
+      break;
     }
   }
 
@@ -98,7 +99,7 @@ export async function startBroker(task: string, cfg?: ControlConfig): Promise<St
     throw new Error("Failed to spawn broker: no pid assigned");
   }
 
-  return { pid, runId };
+  return { pid: resolvedPid, runId };
 }
 
 // ---------------------------------------------------------------------------
@@ -222,4 +223,19 @@ function isPidAlive(pid: number): boolean {
 
 async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function matchesStartedRun(
+  status: RunStatus | null,
+  task: string,
+  cwd: string,
+  launchedAtMs: number,
+): status is RunStatus {
+  if (!status) return false;
+  if (status.task !== task || status.cwd !== cwd) return false;
+
+  const startedAtMs = Date.parse(status.startedAt);
+  if (Number.isNaN(startedAtMs)) return false;
+
+  return startedAtMs >= launchedAtMs - 1_000;
 }

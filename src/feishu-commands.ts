@@ -21,6 +21,8 @@ export type FeishuCommandRuntime = {
   allowedChatIds: string[];
   cfg: ControlConfig;
   deps: FeishuCommandDeps;
+  completionPollMs?: number;
+  completionTimeoutMs?: number;
 };
 
 type ParsedCommand = {
@@ -54,6 +56,16 @@ export function createFeishuCommandHandlers(runtime: FeishuCommandRuntime) {
             await message.reply(
               `Broker started.\nPID: ${result.pid}\nRun: ${result.runId ?? "pending..."}`,
             );
+            if (result.runId) {
+              void replyOnRunCompletion({
+                runId: result.runId,
+                cfg: runtime.cfg,
+                readStatus: runtime.deps.readStatus,
+                reply: message.reply,
+                pollMs: runtime.completionPollMs ?? 2_000,
+                timeoutMs: runtime.completionTimeoutMs ?? 15 * 60_000,
+              });
+            }
           } catch (err) {
             await message.reply(`Failed to start: ${err}`);
           }
@@ -129,10 +141,53 @@ export function parseCommand(text: string): ParsedCommand | null {
   };
 }
 
+export async function replyOnRunCompletion(options: {
+  runId: string;
+  cfg: ControlConfig;
+  readStatus(runId: string | undefined, cfg: ControlConfig): Promise<RunStatus | null>;
+  reply(text: string): Promise<unknown> | unknown;
+  pollMs: number;
+  timeoutMs: number;
+}): Promise<void> {
+  const deadlineAt = Date.now() + options.timeoutMs;
+
+  while (Date.now() < deadlineAt) {
+    await sleep(options.pollMs);
+    const status = await options.readStatus(options.runId, options.cfg);
+    if (!status || status.phase !== "stopped") continue;
+
+    await options.reply(formatCompletionMessage(status));
+    return;
+  }
+}
+
 function isAllowedMessage(runtime: FeishuCommandRuntime, message: FeishuCommandMessage): boolean {
   const userAllowed =
     runtime.allowedUserIds.length === 0 || runtime.allowedUserIds.includes(message.userId);
   const chatAllowed =
     runtime.allowedChatIds.length === 0 || runtime.allowedChatIds.includes(message.chatId);
   return userAllowed && chatAllowed;
+}
+
+function formatCompletionMessage(status: RunStatus): string {
+  if (status.progressSummary?.text) {
+    return [`Run ${status.runId} completed.`, status.progressSummary.text].join("\n\n");
+  }
+
+  const lines = [
+    `Run ${status.runId} stopped (${status.stopReason ?? "unknown"}) by ${status.stopBy ?? "unknown"}.`,
+  ];
+
+  if (status.stopTextPreview) {
+    lines.push(`Final: ${status.stopTextPreview}`);
+  }
+  if (status.progressSummary?.text) {
+    lines.push(status.progressSummary.text);
+  }
+
+  return lines.join("\n\n");
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
