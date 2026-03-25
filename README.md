@@ -12,11 +12,11 @@
 
 ## 当前状态
 
-项目已经完成了三个阶段中的前两阶段，并落下了 Phase 3 的第一版远程入口：
+项目已经完成了三个阶段中的前两阶段，并落下了 Phase 3 的两种第一版远程入口：
 
 - **Phase 1：单会话 runtime** — 已通过真机 smoke test（启动、输入输出、异常重启、退出日志完整性）
 - **Phase 2：双 agent broker** — 已通过 live test（Codex 和 Claude 完成文件协议 roundtrip 并达成 AGREED）
-- **Phase 3：远程控制（Telegram v1）** — 已接入最小命令面（`/run`、`/status`、`/stop`、`/last`）
+- **Phase 3：远程控制（Telegram v1 / Feishu v1）** — 已接入最小命令面（`/run`、`/status`、`/stop`、`/last`）
 
 ## 核心架构
 
@@ -156,6 +156,9 @@ coco/
     status.ts          # 读取并打印最新 run 状态
     run-status.ts      # status.json / latest-run.json 写入
     control.ts         # 本地控制 API（start/status/stop/last）
+    feishu.ts          # Feishu 长连接入口
+    feishu-runtime.ts  # Feishu WebSocket transport
+    feishu-commands.ts # Feishu 命令层
     telegram.ts        # Telegram 命令入口
     telegram-state.ts  # Telegram 订阅和 notifier 状态持久化
     pty-session.ts     # PTY 封装
@@ -262,6 +265,32 @@ npm run telegram
 
 Telegram 主动通知轮询默认是 5 秒，可通过 `COCO_TELEGRAM_NOTIFY_POLL_MS` 调整；设为 `0` 可关闭。
 
+### Feishu 模式
+
+Feishu v1 目前走长连接 WebSocket 模式，复用现有 `control.ts`：
+
+```bash
+COCO_FEISHU_APP_ID=cli_xxx \
+COCO_FEISHU_APP_SECRET=sec_xxx \
+npm run feishu
+```
+
+可选环境变量：
+
+- `COCO_FEISHU_DOMAIN`：`feishu`（默认）、`lark` 或自定义开放平台域名
+- `COCO_FEISHU_USERS`：允许访问的 sender `open_id` 列表，逗号分隔
+- `COCO_FEISHU_CHATS`：允许访问的 `chat_id` 列表，逗号分隔
+
+当前支持的命令：
+
+- `/run <task>`：后台启动一个 broker run
+- `/status [runId]`：查看最新或指定 run 的状态
+- `/stop [runId]`：停止最新或指定 run
+- `/last [runId]`：查看最近一次转发摘要
+- `/help`
+
+Feishu v1 暂时不做订阅持久化和主动通知，它的目标只是提供一个最小可用的远程入口。
+
 ## 技术栈
 
 - Node.js 22+、TypeScript、`tsx`
@@ -282,6 +311,7 @@ Telegram 主动通知轮询默认是 5 秒，可通过 `COCO_TELEGRAM_NOTIFY_POL
 - [x] 最小控制平面（status.json / latest-run.json / broker.pid）
 - [x] 本地控制 API（startBroker / readStatus / stopBroker / lastTurn）
 - [x] Telegram v1（/run /status /stop /last）
+- [x] Feishu v1（WebSocket 长连接，/run /status /stop /last）
 - [x] Telegram 订阅持久化（subscribers.json / notifier.json）
 - [x] Telegram 主动通知（forward / recovery / stop）
 - [x] 进度摘要（recentTurns / progressSummary）
@@ -293,6 +323,7 @@ Telegram 主动通知轮询默认是 5 秒，可通过 `COCO_TELEGRAM_NOTIFY_POL
 ### Phase 3: 远程控制
 
 - [x] 接 Telegram 作为第一版远程入口
+- [x] 接 Feishu 作为第二个第一版远程入口
 - [x] 复用现有 status 面，暴露远程 `status`
 - [x] 暴露远程 `stop` / 最近 turn 摘要
 - [x] 持久化 Telegram 订阅列表和通知 cursor

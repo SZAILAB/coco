@@ -5,12 +5,14 @@
   "scripts": {
     "broker": "tsx src/run-broker.ts",
     "dev": "tsx src/index.ts",
+    "feishu": "tsx src/feishu.ts",
     "postinstall": "node scripts/fix-node-pty-helper.mjs",
     "status": "tsx src/status.ts",
     "telegram": "tsx src/telegram.ts",
     "test": "vitest run"
   },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.59.0",
     "grammy": "^1.41.1",
     "node-pty": "^1.0.0"
   },

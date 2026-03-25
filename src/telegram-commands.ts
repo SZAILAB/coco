@@ -167,7 +167,7 @@ export function buildHelpText(): string {
   ].join("\n");
 }
 
-function formatStatusMessage(status: RunStatus): string {
+export function formatStatusMessage(status: RunStatus): string {
   const lines = [
     `Run: ${status.runId}`,
     `Phase: ${status.phase}`,
@@ -198,7 +198,7 @@ function formatStatusMessage(status: RunStatus): string {
   return lines.join("\n");
 }
 
-function formatLastTurnMessage(summary: LastTurnSummary): string {
+export function formatLastTurnMessage(summary: LastTurnSummary): string {
   const lines = [`Run: ${summary.runId} (${summary.phase})`, `Round: ${summary.round}`];
 
   if (summary.progressSummary) {
