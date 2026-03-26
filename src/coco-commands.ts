@@ -1,5 +1,5 @@
 import type { DirectAgent, DirectSendResult } from "./direct-backend.js";
-import type { DirectChatState, DirectDispatchOutput } from "./direct-session.js";
+import type { DirectChatState, DirectDispatchOptions, DirectDispatchOutput } from "./direct-session.js";
 
 export type CocoCommandDeps = {
   bind(chatKey: string, agent: DirectAgent, sessionId: string, cwd: string): Promise<DirectChatState>;
@@ -8,7 +8,7 @@ export type CocoCommandDeps = {
   sendToActive(
     chatKey: string,
     text: string,
-    options?: { bypassXcheck?: boolean },
+    options?: DirectDispatchOptions,
   ): Promise<DirectDispatchOutput[] | null>;
   current(chatKey: string): DirectChatState;
   detach(chatKey: string, agent?: DirectAgent): Promise<DirectChatState>;
@@ -112,12 +112,19 @@ export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
 
     handlePlainText: async (message: CocoCommandMessage): Promise<boolean> => {
       try {
+        let emitted = false;
         const result = await runtime.deps.sendToActive(message.chatKey, message.text, {
           bypassXcheck: shouldBypassXcheck(message.text),
+          onOutput: async (output) => {
+            emitted = true;
+            await message.reply(formatDispatchOutput(output));
+          },
         });
         if (!result) return false;
-        for (const output of result) {
-          await message.reply(formatDispatchOutput(output));
+        if (!emitted) {
+          for (const output of result) {
+            await message.reply(formatDispatchOutput(output));
+          }
         }
         return true;
       } catch (err) {

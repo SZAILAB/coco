@@ -189,45 +189,58 @@ describe("coco direct commands", () => {
 
     expect(handled).toBe(true);
     expect(reply).toHaveBeenCalledWith("[claude sess-1]\nlooks good");
-    expect(sendToActive).toHaveBeenCalledWith("feishu:oc_1", "/compact", { bypassXcheck: true });
+    expect(sendToActive).toHaveBeenCalledWith(
+      "feishu:oc_1",
+      "/compact",
+      expect.objectContaining({
+        bypassXcheck: true,
+        onOutput: expect.any(Function),
+      }),
+    );
   });
 
-  it("renders all xcheck phases in order", async () => {
+  it("renders all xcheck phases in order without duplicating callback-driven replies", async () => {
     const reply = vi.fn(async (_text: string) => {});
+    const outputs = [
+      {
+        type: "agent" as const,
+        phase: "draft" as const,
+        result: {
+          agent: "codex" as const,
+          sessionId: "thread-1",
+          text: "draft answer",
+        },
+      },
+      {
+        type: "agent" as const,
+        phase: "review" as const,
+        result: {
+          agent: "claude" as const,
+          sessionId: "session-1",
+          text: "review notes",
+        },
+      },
+      {
+        type: "agent" as const,
+        phase: "final" as const,
+        result: {
+          agent: "codex" as const,
+          sessionId: "thread-1",
+          text: "final answer",
+        },
+      },
+    ];
     const handlers = createCocoCommandHandlers({
       deps: {
         bind: vi.fn(),
         use: vi.fn(),
         ask: vi.fn(),
-        sendToActive: vi.fn(async () => [
-          {
-            type: "agent" as const,
-            phase: "draft" as const,
-            result: {
-              agent: "codex" as const,
-              sessionId: "thread-1",
-              text: "draft answer",
-            },
-          },
-          {
-            type: "agent" as const,
-            phase: "review" as const,
-            result: {
-              agent: "claude" as const,
-              sessionId: "session-1",
-              text: "review notes",
-            },
-          },
-          {
-            type: "agent" as const,
-            phase: "final" as const,
-            result: {
-              agent: "codex" as const,
-              sessionId: "thread-1",
-              text: "final answer",
-            },
-          },
-        ]),
+        sendToActive: vi.fn(async (_chatKey, _text, options) => {
+          for (const output of outputs) {
+            await options?.onOutput?.(output);
+          }
+          return outputs;
+        }),
         current: vi.fn(() => makeState()),
         detach: vi.fn(),
         xcheckOn: vi.fn(),

@@ -17,6 +17,11 @@ export type DirectDispatchOutput =
       text: string;
     };
 
+export type DirectDispatchOptions = {
+  bypassXcheck?: boolean;
+  onOutput?(output: DirectDispatchOutput): Promise<void> | void;
+};
+
 export type DirectXcheckStep = "owner-draft" | "reviewer-review" | "owner-final";
 
 export type DirectXcheckSnapshot = {
@@ -117,23 +122,23 @@ export class DirectSessionManager {
   async sendToActive(
     chatKey: string,
     text: string,
-    options?: { bypassXcheck?: boolean },
+    options?: DirectDispatchOptions,
   ): Promise<DirectDispatchOutput[] | null> {
     const chat = this.#chats.get(chatKey);
     if (!chat?.activeTarget) return null;
 
     if (chat.xcheck.run) {
-      return [{ type: "system", text: "xcheck already running, please wait" }];
+      return await this.#withSingleOutput({ type: "system", text: "xcheck already running, please wait" }, options);
     }
 
     const binding = chat.bindings[chat.activeTarget];
     if (!binding) return null;
 
     if (options?.bypassXcheck || !chat.xcheck.enabled) {
-      return await this.#sendDirect(binding, text);
+      return await this.#sendDirect(binding, text, options);
     }
 
-    return await this.#runXcheck(chat, text);
+    return await this.#runXcheck(chat, text, options);
   }
 
   xcheckOn(chatKey: string): DirectChatState {
@@ -235,28 +240,40 @@ export class DirectSessionManager {
     return this.current(chatKey);
   }
 
-  async #sendDirect(binding: DirectBinding, text: string): Promise<DirectDispatchOutput[]> {
+  async #sendDirect(
+    binding: DirectBinding,
+    text: string,
+    options?: DirectDispatchOptions,
+  ): Promise<DirectDispatchOutput[]> {
     try {
-      return [
+      return await this.#withSingleOutput(
         {
           type: "agent",
           phase: "default",
           result: await binding.send(text),
         },
-      ];
+        options,
+      );
     } catch (err) {
-      return [{ type: "system", text: `Failed to send to ${binding.agent}: ${err}` }];
+      return await this.#withSingleOutput(
+        { type: "system", text: `Failed to send to ${binding.agent}: ${err}` },
+        options,
+      );
     }
   }
 
-  async #runXcheck(chat: DirectChatRuntime, userText: string): Promise<DirectDispatchOutput[]> {
+  async #runXcheck(
+    chat: DirectChatRuntime,
+    userText: string,
+    options?: DirectDispatchOptions,
+  ): Promise<DirectDispatchOutput[]> {
     let pair: XcheckPair;
     try {
       pair = this.#requireXcheckPair(chat);
     } catch (err) {
       chat.xcheck.enabled = false;
       chat.xcheck.lastError = String(err);
-      return [{ type: "system", text: `Xcheck was disabled: ${err}` }];
+      return await this.#withSingleOutput({ type: "system", text: `Xcheck was disabled: ${err}` }, options);
     }
 
     const outputs: DirectDispatchOutput[] = [];
@@ -269,57 +286,82 @@ export class DirectSessionManager {
 
     try {
       const draft = await pair.ownerBinding.send(userText);
-      outputs.push({
-        type: "agent",
-        phase: "draft",
-        result: draft,
-      });
-      if (this.#finalizeStoppedRun(chat, "owner draft", outputs)) {
+      await this.#pushOutput(
+        outputs,
+        {
+          type: "agent",
+          phase: "draft",
+          result: draft,
+        },
+        options,
+      );
+      if (await this.#finalizeStoppedRun(chat, "owner draft", outputs, options)) {
         return outputs;
       }
 
       chat.xcheck.run.step = "reviewer-review";
       const review = await pair.reviewerBinding.send(buildXcheckReviewPrompt(pair.owner, userText, draft.text));
-      outputs.push({
-        type: "agent",
-        phase: "review",
-        result: review,
-      });
-      if (this.#finalizeStoppedRun(chat, "reviewer review", outputs)) {
+      await this.#pushOutput(
+        outputs,
+        {
+          type: "agent",
+          phase: "review",
+          result: review,
+        },
+        options,
+      );
+      if (await this.#finalizeStoppedRun(chat, "reviewer review", outputs, options)) {
         return outputs;
       }
 
       chat.xcheck.run.step = "owner-final";
       const final = await pair.ownerBinding.send(buildXcheckFinalPrompt(pair.reviewer, userText, review.text));
-      outputs.push({
-        type: "agent",
-        phase: "final",
-        result: final,
-      });
+      await this.#pushOutput(
+        outputs,
+        {
+          type: "agent",
+          phase: "final",
+          result: final,
+        },
+        options,
+      );
 
       return outputs;
     } catch (err) {
       chat.xcheck.lastError = String(err);
       const step = chat.xcheck.run?.step ?? "owner-draft";
-      outputs.push({
-        type: "system",
-        text: `Xcheck failed during ${formatXcheckStep(step)}: ${err}`,
-      });
+      await this.#pushOutput(
+        outputs,
+        {
+          type: "system",
+          text: `Xcheck failed during ${formatXcheckStep(step)}: ${err}`,
+        },
+        options,
+      );
       return outputs;
     } finally {
       chat.xcheck.run = null;
     }
   }
 
-  #finalizeStoppedRun(chat: DirectChatRuntime, completedStep: string, outputs: DirectDispatchOutput[]): boolean {
+  async #finalizeStoppedRun(
+    chat: DirectChatRuntime,
+    completedStep: string,
+    outputs: DirectDispatchOutput[],
+    options?: DirectDispatchOptions,
+  ): Promise<boolean> {
     if (!chat.xcheck.run?.stopRequested) {
       return false;
     }
 
-    outputs.push({
-      type: "system",
-      text: `Xcheck stopped after ${completedStep}.`,
-    });
+    await this.#pushOutput(
+      outputs,
+      {
+        type: "system",
+        text: `Xcheck stopped after ${completedStep}.`,
+      },
+      options,
+    );
     return true;
   }
 
@@ -374,6 +416,24 @@ export class DirectSessionManager {
     if (chat.xcheck.run) {
       throw new Error(`Cannot ${action} while xcheck is running`);
     }
+  }
+
+  async #withSingleOutput(
+    output: DirectDispatchOutput,
+    options?: DirectDispatchOptions,
+  ): Promise<DirectDispatchOutput[]> {
+    const outputs: DirectDispatchOutput[] = [];
+    await this.#pushOutput(outputs, output, options);
+    return outputs;
+  }
+
+  async #pushOutput(
+    outputs: DirectDispatchOutput[],
+    output: DirectDispatchOutput,
+    options?: DirectDispatchOptions,
+  ): Promise<void> {
+    outputs.push(output);
+    await options?.onOutput?.(output);
   }
 
   #emptyState(): DirectChatState {

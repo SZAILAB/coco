@@ -180,6 +180,95 @@ describe("direct session manager", () => {
     );
   });
 
+  it("emits xcheck outputs incrementally as each step completes", async () => {
+    let releaseReview: ((value: DirectSendResult) => void) | null = null;
+    const seenPhases: string[] = [];
+    const codexSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "draft from codex",
+      })
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "final from codex",
+      });
+    const claudeSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<DirectSendResult>((resolve) => {
+            releaseReview = resolve;
+          }),
+      );
+    const manager = new DirectSessionManager(async (agent, sessionId) =>
+      createFakeBinding(
+        agent,
+        sessionId,
+        "/tmp/project",
+        agent === "codex" ? codexSend : claudeSend,
+      ),
+    );
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    manager.xcheckOn("chat-1");
+
+    const running = manager.sendToActive("chat-1", "please fix this", {
+      onOutput: (output) => {
+        if (output.type === "agent") {
+          seenPhases.push(output.phase);
+        }
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seenPhases).toEqual(["draft"]);
+
+    if (!releaseReview) {
+      throw new Error("expected review resolver to be set");
+    }
+    const resolveReview = releaseReview as (value: DirectSendResult) => void;
+    resolveReview({
+      agent: "claude",
+      sessionId: "session-1",
+      text: "review from claude",
+    });
+
+    await expect(running).resolves.toEqual([
+      {
+        type: "agent",
+        phase: "draft",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "draft from codex",
+        },
+      },
+      {
+        type: "agent",
+        phase: "review",
+        result: {
+          agent: "claude",
+          sessionId: "session-1",
+          text: "review from claude",
+        },
+      },
+      {
+        type: "agent",
+        phase: "final",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "final from codex",
+        },
+      },
+    ]);
+    expect(seenPhases).toEqual(["draft", "review", "final"]);
+  });
+
   it("blocks re-entry while an xcheck run is active", async () => {
     let releaseDraft: ((value: DirectSendResult) => void) | null = null;
     const codexSend = vi
