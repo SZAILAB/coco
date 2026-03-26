@@ -14,12 +14,22 @@ function makeState(overrides?: Partial<DirectChatState>): DirectChatState {
         error: null,
       },
     },
+    xcheck: {
+      enabled: false,
+      owner: "codex",
+      reviewer: null,
+      runState: "idle",
+      step: null,
+      startedAt: null,
+      stopRequested: false,
+      lastError: null,
+    },
     ...overrides,
   };
 }
 
 describe("coco direct commands", () => {
-  it("parses bind and ask commands", () => {
+  it("parses bind, ask, and xcheck commands", () => {
     expect(parseCocoCommand("/coco bind codex thread-1 /tmp/project")).toEqual({
       name: "bind",
       agent: "codex",
@@ -37,6 +47,10 @@ describe("coco direct commands", () => {
       agent: "claude",
       text: "review this",
     });
+    expect(parseCocoCommand("/coco xcheck status")).toEqual({
+      name: "xcheck",
+      action: "status",
+    });
   });
 
   it("binds a session and reports current state", async () => {
@@ -49,6 +63,9 @@ describe("coco direct commands", () => {
         sendToActive: vi.fn(),
         current: vi.fn(() => makeState()),
         detach: vi.fn(async () => makeState({ activeTarget: null, bindings: {} })),
+        xcheckOn: vi.fn(() => makeState()),
+        xcheckOff: vi.fn(() => makeState({ xcheck: { ...makeState().xcheck, enabled: false } })),
+        xcheckStop: vi.fn(() => makeState()),
       },
     });
 
@@ -64,20 +81,103 @@ describe("coco direct commands", () => {
     );
   });
 
-  it("forwards plain text to the active session", async () => {
+  it("enables xcheck mode", async () => {
     const reply = vi.fn(async (_text: string) => {});
     const handlers = createCocoCommandHandlers({
       deps: {
         bind: vi.fn(),
         use: vi.fn(),
         ask: vi.fn(),
-        sendToActive: vi.fn(async () => ({
+        sendToActive: vi.fn(),
+        current: vi.fn(() =>
+          makeState({
+            bindings: {
+              codex: makeState().bindings.codex,
+              claude: {
+                agent: "claude",
+                sessionId: "session-1",
+                cwd: "/tmp/project",
+                status: "ready",
+                error: null,
+              },
+            },
+            xcheck: {
+              enabled: true,
+              owner: "codex",
+              reviewer: "claude",
+              runState: "idle",
+              step: null,
+              startedAt: null,
+              stopRequested: false,
+              lastError: null,
+            },
+          }),
+        ),
+        detach: vi.fn(),
+        xcheckOn: vi.fn(() =>
+          makeState({
+            bindings: {
+              codex: makeState().bindings.codex,
+              claude: {
+                agent: "claude",
+                sessionId: "session-1",
+                cwd: "/tmp/project",
+                status: "ready",
+                error: null,
+              },
+            },
+            xcheck: {
+              enabled: true,
+              owner: "codex",
+              reviewer: "claude",
+              runState: "idle",
+              step: null,
+              startedAt: null,
+              stopRequested: false,
+              lastError: null,
+            },
+          }),
+        ),
+        xcheckOff: vi.fn(),
+        xcheckStop: vi.fn(),
+      },
+    });
+
+    const handled = await handlers.handleCocoCommand({
+      chatKey: "feishu:oc_1",
+      text: "/coco xcheck on",
+      reply,
+    });
+
+    expect(handled).toBe(true);
+    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Xcheck mode enabled."));
+    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Reviewer: claude"));
+  });
+
+  it("forwards slash commands to the active session without xcheck", async () => {
+    const reply = vi.fn(async (_text: string) => {});
+    const sendToActive = vi.fn(async () => [
+      {
+        type: "agent" as const,
+        phase: "default" as const,
+        result: {
           agent: "claude" as const,
           sessionId: "sess-1",
           text: "looks good",
-        })),
+        },
+      },
+    ]);
+    const handlers = createCocoCommandHandlers({
+      deps: {
+        bind: vi.fn(),
+        use: vi.fn(),
+        ask: vi.fn(),
+        sendToActive,
         current: vi.fn(() => makeState()),
         detach: vi.fn(),
+        xcheckOn: vi.fn(),
+        xcheckOff: vi.fn(),
+        xcheckStop: vi.fn(),
       },
     });
 
@@ -89,5 +189,64 @@ describe("coco direct commands", () => {
 
     expect(handled).toBe(true);
     expect(reply).toHaveBeenCalledWith("[claude sess-1]\nlooks good");
+    expect(sendToActive).toHaveBeenCalledWith("feishu:oc_1", "/compact", { bypassXcheck: true });
+  });
+
+  it("renders all xcheck phases in order", async () => {
+    const reply = vi.fn(async (_text: string) => {});
+    const handlers = createCocoCommandHandlers({
+      deps: {
+        bind: vi.fn(),
+        use: vi.fn(),
+        ask: vi.fn(),
+        sendToActive: vi.fn(async () => [
+          {
+            type: "agent" as const,
+            phase: "draft" as const,
+            result: {
+              agent: "codex" as const,
+              sessionId: "thread-1",
+              text: "draft answer",
+            },
+          },
+          {
+            type: "agent" as const,
+            phase: "review" as const,
+            result: {
+              agent: "claude" as const,
+              sessionId: "session-1",
+              text: "review notes",
+            },
+          },
+          {
+            type: "agent" as const,
+            phase: "final" as const,
+            result: {
+              agent: "codex" as const,
+              sessionId: "thread-1",
+              text: "final answer",
+            },
+          },
+        ]),
+        current: vi.fn(() => makeState()),
+        detach: vi.fn(),
+        xcheckOn: vi.fn(),
+        xcheckOff: vi.fn(),
+        xcheckStop: vi.fn(),
+      },
+    });
+
+    const handled = await handlers.handlePlainText({
+      chatKey: "feishu:oc_1",
+      text: "please review this",
+      reply,
+    });
+
+    expect(handled).toBe(true);
+    expect(reply.mock.calls).toEqual([
+      ["[codex draft thread-1]\ndraft answer"],
+      ["[claude review session-1]\nreview notes"],
+      ["[codex final thread-1]\nfinal answer"],
+    ]);
   });
 });

@@ -38,7 +38,7 @@ describe("feishu runtime", () => {
         message_id: "om_123",
         chat_id: "oc_123",
         message_type: "text",
-        content: '{"text":"/run hello"}',
+        content: '{"text":"/coco help"}',
       },
     };
 
@@ -46,7 +46,7 @@ describe("feishu runtime", () => {
       messageId: "om_123",
       chatId: "oc_123",
       userId: "ou_123",
-      text: "/run hello",
+      text: "/coco help",
     });
     expect(extractInboundMessage(event, recent, 1001)).toBeNull();
   });

@@ -1,23 +1,8 @@
 import { Bot } from "grammy";
-import path from "node:path";
 import { createCocoCommandHandlers } from "./coco-commands.js";
-import { defaultControlConfig, lastTurn, readStatus, startBroker, stopBroker } from "./control.js";
+import { buildDirectSessionEntryText, buildNoActiveTargetText } from "./coco-commands.js";
 import { directSessions } from "./direct-session.js";
-import { collectStatusNotifications, createNotificationCursor } from "./telegram-notify.js";
 import { createTelegramCommandHandlers } from "./telegram-commands.js";
-import {
-  createTelegramStatePaths,
-  loadTelegramNotifierState,
-  loadTelegramSubscribers,
-  saveTelegramNotifierState,
-  saveTelegramSubscribers,
-  type TelegramNotifierState,
-  type TelegramSubscription,
-} from "./telegram-state.js";
-
-// ---------------------------------------------------------------------------
-// Telegram bot — thin shell over control.ts
-// ---------------------------------------------------------------------------
 
 const token = process.env.COCO_TELEGRAM_TOKEN;
 if (!token) {
@@ -31,63 +16,29 @@ const allowedUserIds = (process.env.COCO_TELEGRAM_USERS ?? "")
   .map((s) => Number.parseInt(s.trim(), 10))
   .filter((n) => Number.isFinite(n) && n > 0);
 
-const cfg = defaultControlConfig();
-const telegramState = createTelegramStatePaths(
-  path.resolve(cfg.cwd, process.env.COCO_TELEGRAM_STATE_DIR ?? "state/telegram"),
-);
 const bot = new Bot(token);
-const subscriptions = new Map<number, TelegramSubscription>();
-const notifyPollMs = Math.max(
-  0,
-  Number.parseInt(process.env.COCO_TELEGRAM_NOTIFY_POLL_MS ?? "5000", 10) || 5_000,
-);
 const handlers = createTelegramCommandHandlers({
   allowedUserIds,
-  subscriptions,
-  cfg,
-  deps: {
-    startBroker,
-    readStatus,
-    stopBroker,
-    lastTurn,
-    persistSubscriptions,
-  },
 });
 const cocoHandlers = createCocoCommandHandlers({
   deps: {
     bind: (chatKey, agent, sessionId, cwd) => directSessions.bind(chatKey, agent, sessionId, cwd),
     use: (chatKey, agent) => directSessions.use(chatKey, agent),
     ask: (chatKey, agent, text) => directSessions.ask(chatKey, agent, text),
-    sendToActive: (chatKey, text) => directSessions.sendToActive(chatKey, text),
+    sendToActive: (chatKey, text, options) => directSessions.sendToActive(chatKey, text, options),
     current: (chatKey) => directSessions.current(chatKey),
     detach: (chatKey, agent) => directSessions.detach(chatKey, agent),
+    xcheckOn: (chatKey) => directSessions.xcheckOn(chatKey),
+    xcheckOff: (chatKey) => directSessions.xcheckOff(chatKey),
+    xcheckStop: (chatKey) => directSessions.xcheckStop(chatKey),
   },
 });
 
 // Auth guard — checks from.id against allowlist
 bot.use((ctx, next) => handlers.authGuard(ctx, next));
 
-// /subscribe
-bot.command("subscribe", handlers.subscribe);
-
-// /unsubscribe
-bot.command("unsubscribe", handlers.unsubscribe);
-
-// /subscribers
-bot.command("subscribers", handlers.subscribers);
-
-// /run <task>
-bot.command("run", handlers.run);
-
-// /status [runId]
-bot.command("status", handlers.status);
-
-// /stop [runId]
-bot.command("stop", handlers.stop);
-
-// /last [runId]
-bot.command("last", handlers.last);
-
+// /start
+bot.command("start", handlers.help);
 // /help
 bot.command("help", handlers.help);
 
@@ -114,92 +65,15 @@ bot.on("message:text", async (ctx, next) => {
     reply: (replyText) => ctx.reply(replyText),
   });
   if (!handled) {
-    await next();
+    await ctx.reply(text.startsWith("/") ? buildDirectSessionEntryText() : buildNoActiveTargetText());
   }
 });
 
 // Start
-const notifierState = await loadPersistedState();
 console.log("[telegram] Starting bot...");
-startNotifier(notifierState);
 bot.start({
   onStart: () => console.log("[telegram] Bot is running"),
 });
-
-function startNotifier(initialState: TelegramNotifierState): void {
-  if (notifyPollMs <= 0) return;
-
-  let seeded = initialState.seeded;
-  let cursor = initialState.cursor ?? createNotificationCursor();
-  let polling = false;
-
-  const poll = async () => {
-    if (polling || subscriptions.size === 0) return;
-    polling = true;
-    try {
-      const previousCursor = JSON.stringify(cursor);
-      const status = await readStatus(undefined, cfg);
-      const result = collectStatusNotifications(cursor, status);
-      cursor = result.cursor;
-
-      if (!seeded) {
-        seeded = true;
-        await saveTelegramNotifierState(telegramState, { seeded, cursor });
-        return;
-      }
-
-      if (previousCursor !== JSON.stringify(cursor)) {
-        await saveTelegramNotifierState(telegramState, { seeded, cursor });
-      }
-
-      for (const notification of result.notifications) {
-        await broadcast(notification.text);
-      }
-    } catch (err) {
-      console.error("[telegram] Notification poll failed:", err);
-    } finally {
-      polling = false;
-    }
-  };
-
-  const timer = setInterval(() => {
-    void poll();
-  }, notifyPollMs);
-  timer.unref?.();
-}
-
-async function broadcast(text: string): Promise<void> {
-  for (const subscription of subscriptions.values()) {
-    if (!isAllowedBroadcastUserId(subscription.userId)) continue;
-    try {
-      await bot.api.sendMessage(subscription.chatId, text);
-    } catch (err) {
-      console.error(`[telegram] Failed to notify chat ${subscription.chatId}:`, err);
-    }
-  }
-}
-
-async function loadPersistedState(): Promise<TelegramNotifierState> {
-  const [storedSubscriptions, storedNotifier] = await Promise.all([
-    loadTelegramSubscribers(telegramState),
-    loadTelegramNotifierState(telegramState),
-  ]);
-
-  subscriptions.clear();
-  for (const subscription of storedSubscriptions) {
-    subscriptions.set(subscription.chatId, subscription);
-  }
-
-  return storedNotifier;
-}
-
-async function persistSubscriptions(): Promise<void> {
-  await saveTelegramSubscribers(telegramState, [...subscriptions.values()]);
-}
-
-function isAllowedBroadcastUserId(userId: number | undefined): boolean {
-  return allowedUserIds.length === 0 || (!!userId && allowedUserIds.includes(userId));
-}
 
 function buildTelegramChatKey(chatId: number | undefined): string {
   return `telegram:${chatId ?? "unknown"}`;
@@ -211,16 +85,5 @@ function isReservedTelegramCommand(text: string): boolean {
 
   const raw = trimmed.slice(1).split(/\s+/, 1)[0] ?? "";
   const command = raw.split("@", 1)[0]?.toLowerCase() ?? "";
-  return (
-    command === "start" ||
-    command === "help" ||
-    command === "run" ||
-    command === "status" ||
-    command === "stop" ||
-    command === "last" ||
-    command === "subscribe" ||
-    command === "unsubscribe" ||
-    command === "subscribers" ||
-    command === "coco"
-  );
+  return command === "start" || command === "help" || command === "coco";
 }

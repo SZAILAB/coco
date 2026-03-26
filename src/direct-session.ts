@@ -6,6 +6,30 @@ import {
   type DirectSendResult,
 } from "./direct-backend.js";
 
+export type DirectDispatchOutput =
+  | {
+      type: "agent";
+      phase: "default" | "draft" | "review" | "final";
+      result: DirectSendResult;
+    }
+  | {
+      type: "system";
+      text: string;
+    };
+
+export type DirectXcheckStep = "owner-draft" | "reviewer-review" | "owner-final";
+
+export type DirectXcheckSnapshot = {
+  enabled: boolean;
+  owner: DirectAgent | null;
+  reviewer: DirectAgent | null;
+  runState: "idle" | "running";
+  step: DirectXcheckStep | null;
+  startedAt: string | null;
+  stopRequested: boolean;
+  lastError: string | null;
+};
+
 export type DirectBindingSnapshot = {
   agent: DirectAgent;
   sessionId: string;
@@ -17,16 +41,34 @@ export type DirectBindingSnapshot = {
 export type DirectChatState = {
   activeTarget: DirectAgent | null;
   bindings: Partial<Record<DirectAgent, DirectBindingSnapshot>>;
+  xcheck: DirectXcheckSnapshot;
+};
+
+type DirectChatRuntime = {
+  activeTarget: DirectAgent | null;
+  bindings: Partial<Record<DirectAgent, DirectBinding>>;
+  xcheck: {
+    enabled: boolean;
+    run:
+      | {
+          step: DirectXcheckStep;
+          startedAt: number;
+          stopRequested: boolean;
+        }
+      | null;
+    lastError: string | null;
+  };
+};
+
+type XcheckPair = {
+  owner: DirectAgent;
+  reviewer: DirectAgent;
+  ownerBinding: DirectBinding;
+  reviewerBinding: DirectBinding;
 };
 
 export class DirectSessionManager {
-  readonly #chats = new Map<
-    string,
-    {
-      activeTarget: DirectAgent | null;
-      bindings: Partial<Record<DirectAgent, DirectBinding>>;
-    }
-  >();
+  readonly #chats = new Map<string, DirectChatRuntime>();
   readonly #bindingFactory: typeof createDirectBinding;
 
   constructor(bindingFactory = createDirectBinding) {
@@ -35,6 +77,8 @@ export class DirectSessionManager {
 
   async bind(chatKey: string, agent: DirectAgent, sessionId: string, cwd: string): Promise<DirectChatState> {
     const chat = this.#getOrCreateChat(chatKey);
+    this.#assertNoXcheckRun(chat, "bind a session");
+
     const existing = chat.bindings[agent];
     if (existing) {
       await existing.close();
@@ -53,6 +97,8 @@ export class DirectSessionManager {
     if (!chat?.bindings[agent]) {
       throw new Error(`No ${agent} session is bound for this chat`);
     }
+
+    this.#assertNoXcheckRun(chat, "switch the active target");
     chat.activeTarget = agent;
     return this.current(chatKey);
   }
@@ -63,21 +109,69 @@ export class DirectSessionManager {
     if (!binding) {
       throw new Error(`No ${agent} session is bound for this chat`);
     }
+
+    this.#assertNoXcheckRun(chat, "send a directed message");
     return await binding.send(text);
   }
 
-  async sendToActive(chatKey: string, text: string): Promise<DirectSendResult | null> {
+  async sendToActive(
+    chatKey: string,
+    text: string,
+    options?: { bypassXcheck?: boolean },
+  ): Promise<DirectDispatchOutput[] | null> {
     const chat = this.#chats.get(chatKey);
     if (!chat?.activeTarget) return null;
+
+    if (chat.xcheck.run) {
+      return [{ type: "system", text: "xcheck already running, please wait" }];
+    }
+
     const binding = chat.bindings[chat.activeTarget];
     if (!binding) return null;
-    return await binding.send(text);
+
+    if (options?.bypassXcheck || !chat.xcheck.enabled) {
+      return await this.#sendDirect(binding, text);
+    }
+
+    return await this.#runXcheck(chat, text);
+  }
+
+  xcheckOn(chatKey: string): DirectChatState {
+    const chat = this.#getOrCreateChat(chatKey);
+    this.#assertNoXcheckRun(chat, "enable xcheck");
+    this.#requireXcheckPair(chat);
+    chat.xcheck.enabled = true;
+    chat.xcheck.lastError = null;
+    return this.current(chatKey);
+  }
+
+  xcheckOff(chatKey: string): DirectChatState {
+    const chat = this.#chats.get(chatKey);
+    if (!chat) {
+      return this.#emptyState();
+    }
+
+    this.#assertNoXcheckRun(chat, "disable xcheck");
+    chat.xcheck.enabled = false;
+    chat.xcheck.lastError = null;
+    return this.current(chatKey);
+  }
+
+  xcheckStop(chatKey: string): DirectChatState {
+    const chat = this.#chats.get(chatKey);
+    const run = chat?.xcheck.run;
+    if (!chat || !run) {
+      throw new Error("No xcheck run is currently active for this chat");
+    }
+
+    run.stopRequested = true;
+    return this.current(chatKey);
   }
 
   current(chatKey: string): DirectChatState {
     const chat = this.#chats.get(chatKey);
     if (!chat) {
-      return { activeTarget: null, bindings: {} };
+      return this.#emptyState();
     }
 
     const bindings: Partial<Record<DirectAgent, DirectBindingSnapshot>> = {};
@@ -96,14 +190,17 @@ export class DirectSessionManager {
     return {
       activeTarget: chat.activeTarget,
       bindings,
+      xcheck: this.#snapshotXcheck(chat),
     };
   }
 
   async detach(chatKey: string, agent?: DirectAgent): Promise<DirectChatState> {
     const chat = this.#chats.get(chatKey);
     if (!chat) {
-      return { activeTarget: null, bindings: {} };
+      return this.#emptyState();
     }
+
+    this.#assertNoXcheckRun(chat, "detach a session");
 
     const targets = agent
       ? [agent]
@@ -128,18 +225,185 @@ export class DirectSessionManager {
 
     if (!chat.bindings.codex && !chat.bindings.claude) {
       this.#chats.delete(chatKey);
-      return { activeTarget: null, bindings: {} };
+      return this.#emptyState();
+    }
+
+    if (!chat.bindings.codex || !chat.bindings.claude || !chat.activeTarget) {
+      chat.xcheck.enabled = false;
     }
 
     return this.current(chatKey);
   }
 
-  #getOrCreateChat(chatKey: string) {
+  async #sendDirect(binding: DirectBinding, text: string): Promise<DirectDispatchOutput[]> {
+    try {
+      return [
+        {
+          type: "agent",
+          phase: "default",
+          result: await binding.send(text),
+        },
+      ];
+    } catch (err) {
+      return [{ type: "system", text: `Failed to send to ${binding.agent}: ${err}` }];
+    }
+  }
+
+  async #runXcheck(chat: DirectChatRuntime, userText: string): Promise<DirectDispatchOutput[]> {
+    let pair: XcheckPair;
+    try {
+      pair = this.#requireXcheckPair(chat);
+    } catch (err) {
+      chat.xcheck.enabled = false;
+      chat.xcheck.lastError = String(err);
+      return [{ type: "system", text: `Xcheck was disabled: ${err}` }];
+    }
+
+    const outputs: DirectDispatchOutput[] = [];
+    chat.xcheck.lastError = null;
+    chat.xcheck.run = {
+      step: "owner-draft",
+      startedAt: Date.now(),
+      stopRequested: false,
+    };
+
+    try {
+      const draft = await pair.ownerBinding.send(userText);
+      outputs.push({
+        type: "agent",
+        phase: "draft",
+        result: draft,
+      });
+      if (this.#finalizeStoppedRun(chat, "owner draft", outputs)) {
+        return outputs;
+      }
+
+      chat.xcheck.run.step = "reviewer-review";
+      const review = await pair.reviewerBinding.send(buildXcheckReviewPrompt(pair.owner, userText, draft.text));
+      outputs.push({
+        type: "agent",
+        phase: "review",
+        result: review,
+      });
+      if (this.#finalizeStoppedRun(chat, "reviewer review", outputs)) {
+        return outputs;
+      }
+
+      chat.xcheck.run.step = "owner-final";
+      const final = await pair.ownerBinding.send(buildXcheckFinalPrompt(pair.reviewer, userText, review.text));
+      outputs.push({
+        type: "agent",
+        phase: "final",
+        result: final,
+      });
+
+      return outputs;
+    } catch (err) {
+      chat.xcheck.lastError = String(err);
+      const step = chat.xcheck.run?.step ?? "owner-draft";
+      outputs.push({
+        type: "system",
+        text: `Xcheck failed during ${formatXcheckStep(step)}: ${err}`,
+      });
+      return outputs;
+    } finally {
+      chat.xcheck.run = null;
+    }
+  }
+
+  #finalizeStoppedRun(chat: DirectChatRuntime, completedStep: string, outputs: DirectDispatchOutput[]): boolean {
+    if (!chat.xcheck.run?.stopRequested) {
+      return false;
+    }
+
+    outputs.push({
+      type: "system",
+      text: `Xcheck stopped after ${completedStep}.`,
+    });
+    return true;
+  }
+
+  #snapshotXcheck(chat: DirectChatRuntime): DirectXcheckSnapshot {
+    const { owner, reviewer } = this.#participants(chat);
+    return {
+      enabled: chat.xcheck.enabled,
+      owner,
+      reviewer,
+      runState: chat.xcheck.run ? "running" : "idle",
+      step: chat.xcheck.run?.step ?? null,
+      startedAt: chat.xcheck.run ? new Date(chat.xcheck.run.startedAt).toISOString() : null,
+      stopRequested: chat.xcheck.run?.stopRequested ?? false,
+      lastError: chat.xcheck.lastError,
+    };
+  }
+
+  #participants(chat: DirectChatRuntime): { owner: DirectAgent | null; reviewer: DirectAgent | null } {
+    const owner = chat.activeTarget;
+    if (!owner) {
+      return { owner: null, reviewer: null };
+    }
+
+    const reviewer =
+      owner === "codex"
+        ? chat.bindings.claude
+          ? "claude"
+          : null
+        : chat.bindings.codex
+          ? "codex"
+          : null;
+
+    return { owner, reviewer };
+  }
+
+  #requireXcheckPair(chat: DirectChatRuntime): XcheckPair {
+    const { owner, reviewer } = this.#participants(chat);
+    if (!owner || !reviewer) {
+      throw new Error("Xcheck requires both codex and claude to be bound and an active target selected");
+    }
+
+    const ownerBinding = chat.bindings[owner];
+    const reviewerBinding = chat.bindings[reviewer];
+    if (!ownerBinding || !reviewerBinding) {
+      throw new Error("Xcheck bindings are incomplete for this chat");
+    }
+
+    return { owner, reviewer, ownerBinding, reviewerBinding };
+  }
+
+  #assertNoXcheckRun(chat: DirectChatRuntime, action: string): void {
+    if (chat.xcheck.run) {
+      throw new Error(`Cannot ${action} while xcheck is running`);
+    }
+  }
+
+  #emptyState(): DirectChatState {
+    return {
+      activeTarget: null,
+      bindings: {},
+      xcheck: {
+        enabled: false,
+        owner: null,
+        reviewer: null,
+        runState: "idle",
+        step: null,
+        startedAt: null,
+        stopRequested: false,
+        lastError: null,
+      },
+    };
+  }
+
+  #getOrCreateChat(chatKey: string): DirectChatRuntime {
     let chat = this.#chats.get(chatKey);
     if (!chat) {
       chat = {
         activeTarget: null,
         bindings: {},
+        xcheck: {
+          enabled: false,
+          run: null,
+          lastError: null,
+        },
       };
       this.#chats.set(chatKey, chat);
     }
@@ -148,3 +412,44 @@ export class DirectSessionManager {
 }
 
 export const directSessions = new DirectSessionManager();
+
+function buildXcheckReviewPrompt(owner: DirectAgent, userText: string, draft: string): string {
+  return [
+    "Cross-check mode: review the other agent's draft only.",
+    "Do not answer the user directly.",
+    "Point out concrete mistakes, risks, or missing edge cases.",
+    "",
+    `Owner: ${owner}`,
+    "Original user message:",
+    userText,
+    "",
+    "Draft to review:",
+    draft,
+  ].join("\n");
+}
+
+function buildXcheckFinalPrompt(reviewer: DirectAgent, userText: string, review: string): string {
+  return [
+    "Cross-check mode: revise your previous draft using the review below.",
+    "Return the final user-facing answer.",
+    "Incorporate good feedback and ignore bad feedback if needed.",
+    "",
+    `Reviewer: ${reviewer}`,
+    "Original user message:",
+    userText,
+    "",
+    "Reviewer feedback:",
+    review,
+  ].join("\n");
+}
+
+function formatXcheckStep(step: DirectXcheckStep): string {
+  switch (step) {
+    case "owner-draft":
+      return "owner draft";
+    case "reviewer-review":
+      return "reviewer review";
+    case "owner-final":
+      return "owner final";
+  }
+}

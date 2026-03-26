@@ -1,15 +1,10 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { createCocoCommandHandlers } from "./coco-commands.js";
 import {
-  defaultControlConfig,
-  lastTurn,
-  readStatus,
-  startBroker,
-  stopBroker,
-  type ControlConfig,
-} from "./control.js";
+  buildDirectSessionEntryText,
+  buildNoActiveTargetText,
+  createCocoCommandHandlers,
+} from "./coco-commands.js";
 import { directSessions } from "./direct-session.js";
-import { createFeishuCommandHandlers } from "./feishu-commands.js";
 
 const MAX_TEXT_CHARS = 4000;
 const RECENT_MESSAGE_TTL_MS = 10 * 60_000;
@@ -20,7 +15,6 @@ export type FeishuEnv = {
   domain: string;
   allowedUserIds: string[];
   allowedChatIds: string[];
-  cfg: ControlConfig;
 };
 
 export type FeishuInboundMessage = {
@@ -60,25 +54,17 @@ export async function startFeishuBot(env = readFeishuEnv()): Promise<void> {
     loggerLevel: Lark.LoggerLevel.warn,
     autoReconnect: true,
   });
-  const handlers = createFeishuCommandHandlers({
-    allowedUserIds: env.allowedUserIds,
-    allowedChatIds: env.allowedChatIds,
-    cfg: env.cfg,
-    deps: {
-      startBroker,
-      readStatus,
-      stopBroker,
-      lastTurn,
-    },
-  });
   const cocoHandlers = createCocoCommandHandlers({
     deps: {
       bind: (chatKey, agent, sessionId, cwd) => directSessions.bind(chatKey, agent, sessionId, cwd),
       use: (chatKey, agent) => directSessions.use(chatKey, agent),
       ask: (chatKey, agent, text) => directSessions.ask(chatKey, agent, text),
-      sendToActive: (chatKey, text) => directSessions.sendToActive(chatKey, text),
+      sendToActive: (chatKey, text, options) => directSessions.sendToActive(chatKey, text, options),
       current: (chatKey) => directSessions.current(chatKey),
       detach: (chatKey, agent) => directSessions.detach(chatKey, agent),
+      xcheckOn: (chatKey) => directSessions.xcheckOn(chatKey),
+      xcheckOff: (chatKey) => directSessions.xcheckOff(chatKey),
+      xcheckStop: (chatKey) => directSessions.xcheckStop(chatKey),
     },
   });
   const recentMessageIds = new Map<string, number>();
@@ -107,7 +93,8 @@ export async function startFeishuBot(env = readFeishuEnv()): Promise<void> {
         return;
       }
 
-      await handlers.handleMessage(message);
+      const text = inbound.text.trim();
+      await message.reply(text.startsWith("/") ? buildDirectSessionEntryText() : buildNoActiveTargetText());
     },
   });
 
@@ -133,7 +120,6 @@ export function readFeishuEnv(): FeishuEnv {
     domain: process.env.COCO_FEISHU_DOMAIN?.trim() || "feishu",
     allowedUserIds: parseCsv(process.env.COCO_FEISHU_USERS),
     allowedChatIds: parseCsv(process.env.COCO_FEISHU_CHATS),
-    cfg: defaultControlConfig(),
   };
 }
 

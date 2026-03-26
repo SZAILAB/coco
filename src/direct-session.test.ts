@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { DirectSessionManager } from "./direct-session.js";
 import type { DirectAgent, DirectBinding, DirectBindingStatus, DirectSendResult } from "./direct-backend.js";
 
-function createFakeBinding(agent: DirectAgent, sessionId: string, cwd = "/tmp/project"): DirectBinding {
+function createFakeBinding(
+  agent: DirectAgent,
+  sessionId: string,
+  cwd = "/tmp/project",
+  sendImpl?: (prompt: string) => Promise<DirectSendResult>,
+): DirectBinding {
   let status: DirectBindingStatus = "ready";
   let error: string | null = null;
 
@@ -14,12 +19,17 @@ function createFakeBinding(agent: DirectAgent, sessionId: string, cwd = "/tmp/pr
     error: () => error,
     async send(prompt: string): Promise<DirectSendResult> {
       status = "busy";
-      status = "ready";
-      return {
-        agent,
-        sessionId,
-        text: `${agent}:${prompt}`,
-      };
+      try {
+        return sendImpl
+          ? await sendImpl(prompt)
+          : {
+              agent,
+              sessionId,
+              text: `${agent}:${prompt}`,
+            };
+      } finally {
+        status = "ready";
+      }
     },
     async close(): Promise<void> {
       status = "exited";
@@ -49,11 +59,17 @@ describe("direct session manager", () => {
     await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
     const result = await manager.sendToActive("chat-1", "hello");
 
-    expect(result).toEqual({
-      agent: "codex",
-      sessionId: "thread-1",
-      text: "codex:hello",
-    });
+    expect(result).toEqual([
+      {
+        type: "agent",
+        phase: "default",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "codex:hello",
+        },
+      },
+    ]);
   });
 
   it("detaches the active binding and falls back to the remaining one", async () => {
@@ -81,5 +97,227 @@ describe("direct session manager", () => {
     expect(state.bindings.claude).toBeUndefined();
     expect(state.bindings.codex?.sessionId).toBe("thread-1");
     expect(state.bindings.codex?.cwd).toBe("/tmp/project");
+  });
+
+  it("requires both agents before enabling xcheck", async () => {
+    const manager = new DirectSessionManager(async (agent, sessionId) => createFakeBinding(agent, sessionId));
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+
+    expect(() => manager.xcheckOn("chat-1")).toThrow(
+      "Xcheck requires both codex and claude to be bound and an active target selected",
+    );
+  });
+
+  it("runs the fixed owner draft reviewer review owner final pipeline", async () => {
+    const codexSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "draft from codex",
+      })
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "final from codex",
+      });
+    const claudeSend = vi.fn<(prompt: string) => Promise<DirectSendResult>>().mockResolvedValue({
+      agent: "claude",
+      sessionId: "session-1",
+      text: "review from claude",
+    });
+
+    const manager = new DirectSessionManager(async (agent, sessionId) =>
+      createFakeBinding(
+        agent,
+        sessionId,
+        "/tmp/project",
+        agent === "codex" ? codexSend : claudeSend,
+      ),
+    );
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    manager.xcheckOn("chat-1");
+
+    const result = await manager.sendToActive("chat-1", "please fix this");
+
+    expect(result).toEqual([
+      {
+        type: "agent",
+        phase: "draft",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "draft from codex",
+        },
+      },
+      {
+        type: "agent",
+        phase: "review",
+        result: {
+          agent: "claude",
+          sessionId: "session-1",
+          text: "review from claude",
+        },
+      },
+      {
+        type: "agent",
+        phase: "final",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "final from codex",
+        },
+      },
+    ]);
+    expect(claudeSend).toHaveBeenCalledWith(expect.stringContaining("Original user message:\nplease fix this"));
+    expect(claudeSend).toHaveBeenCalledWith(expect.stringContaining("Draft to review:\ndraft from codex"));
+    expect(codexSend).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("Reviewer feedback:\nreview from claude"),
+    );
+  });
+
+  it("blocks re-entry while an xcheck run is active", async () => {
+    let releaseDraft: ((value: DirectSendResult) => void) | null = null;
+    const codexSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<DirectSendResult>((resolve) => {
+            releaseDraft = resolve;
+          }),
+      )
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "final from codex",
+      });
+    const claudeSend = vi.fn<(prompt: string) => Promise<DirectSendResult>>().mockResolvedValue({
+      agent: "claude",
+      sessionId: "session-1",
+      text: "review from claude",
+    });
+    const manager = new DirectSessionManager(async (agent, sessionId) =>
+      createFakeBinding(
+        agent,
+        sessionId,
+        "/tmp/project",
+        agent === "codex" ? codexSend : claudeSend,
+      ),
+    );
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    manager.xcheckOn("chat-1");
+
+    const running = manager.sendToActive("chat-1", "first request");
+    const blocked = await manager.sendToActive("chat-1", "second request");
+
+    expect(blocked).toEqual([{ type: "system", text: "xcheck already running, please wait" }]);
+
+    if (!releaseDraft) {
+      throw new Error("expected draft resolver to be set");
+    }
+    const resolveDraft = releaseDraft as (value: DirectSendResult) => void;
+    resolveDraft({
+      agent: "codex",
+      sessionId: "thread-1",
+      text: "draft from codex",
+    });
+    await expect(running).resolves.toEqual([
+      {
+        type: "agent",
+        phase: "draft",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "draft from codex",
+        },
+      },
+      {
+        type: "agent",
+        phase: "review",
+        result: {
+          agent: "claude",
+          sessionId: "session-1",
+          text: "review from claude",
+        },
+      },
+      {
+        type: "agent",
+        phase: "final",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "final from codex",
+        },
+      },
+    ]);
+  });
+
+  it("stops after the current xcheck step when stop is requested", async () => {
+    let releaseDraft: ((value: DirectSendResult) => void) | null = null;
+    const codexSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<DirectSendResult>((resolve) => {
+            releaseDraft = resolve;
+          }),
+      );
+    const claudeSend = vi.fn<(prompt: string) => Promise<DirectSendResult>>().mockResolvedValue({
+      agent: "claude",
+      sessionId: "session-1",
+      text: "review from claude",
+    });
+    const manager = new DirectSessionManager(async (agent, sessionId) =>
+      createFakeBinding(
+        agent,
+        sessionId,
+        "/tmp/project",
+        agent === "codex" ? codexSend : claudeSend,
+      ),
+    );
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    manager.xcheckOn("chat-1");
+
+    const running = manager.sendToActive("chat-1", "first request");
+    const stopState = manager.xcheckStop("chat-1");
+
+    expect(stopState.xcheck.runState).toBe("running");
+    expect(stopState.xcheck.stopRequested).toBe(true);
+
+    if (!releaseDraft) {
+      throw new Error("expected draft resolver to be set");
+    }
+    const resolveDraft = releaseDraft as (value: DirectSendResult) => void;
+    resolveDraft({
+      agent: "codex",
+      sessionId: "thread-1",
+      text: "draft from codex",
+    });
+
+    await expect(running).resolves.toEqual([
+      {
+        type: "agent",
+        phase: "draft",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "draft from codex",
+        },
+      },
+      {
+        type: "system",
+        text: "Xcheck stopped after owner draft.",
+      },
+    ]);
+    expect(claudeSend).not.toHaveBeenCalled();
+    expect(manager.current("chat-1").xcheck.runState).toBe("idle");
   });
 });

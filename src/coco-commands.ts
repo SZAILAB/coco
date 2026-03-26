@@ -1,13 +1,20 @@
 import type { DirectAgent, DirectSendResult } from "./direct-backend.js";
-import type { DirectChatState } from "./direct-session.js";
+import type { DirectChatState, DirectDispatchOutput } from "./direct-session.js";
 
 export type CocoCommandDeps = {
   bind(chatKey: string, agent: DirectAgent, sessionId: string, cwd: string): Promise<DirectChatState>;
   use(chatKey: string, agent: DirectAgent): DirectChatState;
   ask(chatKey: string, agent: DirectAgent, text: string): Promise<DirectSendResult>;
-  sendToActive(chatKey: string, text: string): Promise<DirectSendResult | null>;
+  sendToActive(
+    chatKey: string,
+    text: string,
+    options?: { bypassXcheck?: boolean },
+  ): Promise<DirectDispatchOutput[] | null>;
   current(chatKey: string): DirectChatState;
   detach(chatKey: string, agent?: DirectAgent): Promise<DirectChatState>;
+  xcheckOn(chatKey: string): DirectChatState;
+  xcheckOff(chatKey: string): DirectChatState;
+  xcheckStop(chatKey: string): DirectChatState;
 };
 
 export type CocoCommandRuntime = {
@@ -26,7 +33,8 @@ type ParsedCocoCommand =
   | { name: "bind"; agent: DirectAgent; sessionId: string; cwd: string }
   | { name: "use"; agent: DirectAgent }
   | { name: "ask"; agent: DirectAgent; text: string }
-  | { name: "detach"; agent?: DirectAgent };
+  | { name: "detach"; agent?: DirectAgent }
+  | { name: "xcheck"; action: "on" | "off" | "status" | "stop" };
 
 export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
   return {
@@ -95,16 +103,73 @@ export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
             await message.reply(`Failed to detach: ${err}`);
           }
           return true;
+
+        case "xcheck":
+          await handleXcheckCommand(runtime, message, parsed.action);
+          return true;
       }
     },
 
     handlePlainText: async (message: CocoCommandMessage): Promise<boolean> => {
-      const result = await runtime.deps.sendToActive(message.chatKey, message.text);
-      if (!result) return false;
-      await message.reply(formatAgentReply(result));
-      return true;
+      try {
+        const result = await runtime.deps.sendToActive(message.chatKey, message.text, {
+          bypassXcheck: shouldBypassXcheck(message.text),
+        });
+        if (!result) return false;
+        for (const output of result) {
+          await message.reply(formatDispatchOutput(output));
+        }
+        return true;
+      } catch (err) {
+        await message.reply(`Failed to send to the active target: ${err}`);
+        return true;
+      }
     },
   };
+}
+
+async function handleXcheckCommand(
+  runtime: CocoCommandRuntime,
+  message: CocoCommandMessage,
+  action: "on" | "off" | "status" | "stop",
+): Promise<void> {
+  switch (action) {
+    case "status":
+      await message.reply(formatXcheckState(runtime.deps.current(message.chatKey)));
+      return;
+
+    case "on":
+      try {
+        const state = runtime.deps.xcheckOn(message.chatKey);
+        await message.reply(["Xcheck mode enabled.", formatXcheckState(state)].join("\n\n"));
+      } catch (err) {
+        await message.reply(`Failed to enable xcheck: ${err}`);
+      }
+      return;
+
+    case "off":
+      try {
+        const state = runtime.deps.xcheckOff(message.chatKey);
+        await message.reply(["Xcheck mode disabled.", formatXcheckState(state)].join("\n\n"));
+      } catch (err) {
+        await message.reply(`Failed to disable xcheck: ${err}`);
+      }
+      return;
+
+    case "stop":
+      try {
+        const state = runtime.deps.xcheckStop(message.chatKey);
+        await message.reply(
+          [
+            "Stopping the current xcheck run after the current step finishes.",
+            formatXcheckState(state),
+          ].join("\n\n"),
+        );
+      } catch (err) {
+        await message.reply(`Failed to stop xcheck: ${err}`);
+      }
+      return;
+  }
 }
 
 export function parseCocoCommand(text: string): ParsedCocoCommand | null {
@@ -146,6 +211,12 @@ export function parseCocoCommand(text: string): ParsedCocoCommand | null {
       if (!isDirectAgent(rest)) return { name: "help" };
       return { name: "detach", agent: rest };
     }
+    case "xcheck": {
+      if (rest === "on" || rest === "off" || rest === "status" || rest === "stop") {
+        return { name: "xcheck", action: rest };
+      }
+      return { name: "help" };
+    }
     default:
       return { name: "help" };
   }
@@ -160,10 +231,26 @@ export function buildCocoHelpText(): string {
     "/coco ask <codex|claude> <text> - Send one message without switching target",
     "/coco current - Show current bindings and active target",
     "/coco detach [codex|claude] - Detach the active or named binding",
+    "/coco xcheck on - Enable draft, review, final mode for the active target",
+    "/coco xcheck off - Disable xcheck mode",
+    "/coco xcheck status - Show xcheck mode state",
+    "/coco xcheck stop - Stop the current xcheck run after the current step",
     "/coco help - This message",
     "",
     "After you bind and /coco use a target, any non-/coco message is forwarded to that session.",
+    "When xcheck is on, normal messages run owner draft -> reviewer review -> owner final.",
   ].join("\n");
+}
+
+export function buildNoActiveTargetText(): string {
+  return [
+    "No active direct session target is bound for this chat.",
+    "Use /coco help to see commands, then bind a session with /coco bind ...",
+  ].join("\n");
+}
+
+export function buildDirectSessionEntryText(): string {
+  return [buildNoActiveTargetText(), "", buildCocoHelpText()].join("\n\n");
 }
 
 export function formatCurrentState(state: DirectChatState): string {
@@ -187,7 +274,57 @@ export function formatCurrentState(state: DirectChatState): string {
     lines.push("No direct session bindings.");
   }
 
+  lines.push(`Xcheck: ${state.xcheck.enabled ? "on" : "off"}`);
+  lines.push(
+    `Xcheck target: owner=${state.xcheck.owner ?? "none"} reviewer=${state.xcheck.reviewer ?? "none"}`,
+  );
+  if (state.xcheck.runState === "running") {
+    const extra = state.xcheck.stopRequested ? " stop-requested" : "";
+    lines.push(
+      `Xcheck run: [running] step=${state.xcheck.step ?? "unknown"} started=${state.xcheck.startedAt ?? "unknown"}${extra}`,
+    );
+  } else {
+    lines.push("Xcheck run: [idle]");
+  }
+  if (state.xcheck.lastError) {
+    lines.push(`Xcheck last error: ${state.xcheck.lastError}`);
+  }
+
   return lines.join("\n");
+}
+
+export function formatXcheckState(state: DirectChatState): string {
+  const lines = ["Xcheck state:"];
+  lines.push(`Enabled: ${state.xcheck.enabled ? "on" : "off"}`);
+  lines.push(`Owner: ${state.xcheck.owner ?? "none"}`);
+  lines.push(`Reviewer: ${state.xcheck.reviewer ?? "none"}`);
+  lines.push(`Run: ${state.xcheck.runState}`);
+  if (state.xcheck.step) {
+    lines.push(`Step: ${state.xcheck.step}`);
+  }
+  if (state.xcheck.startedAt) {
+    lines.push(`Started: ${state.xcheck.startedAt}`);
+  }
+  if (state.xcheck.stopRequested) {
+    lines.push("Stop Requested: yes");
+  }
+  if (state.xcheck.lastError) {
+    lines.push(`Last Error: ${state.xcheck.lastError}`);
+  }
+  return lines.join("\n");
+}
+
+export function formatDispatchOutput(output: DirectDispatchOutput): string {
+  if (output.type === "system") {
+    return output.text;
+  }
+  if (output.phase === "default") {
+    return formatAgentReply(output.result);
+  }
+
+  const header = `[${output.result.agent} ${output.phase} ${output.result.sessionId}]`;
+  const body = output.result.text.trim() || "(empty reply)";
+  return `${header}\n${body}`;
 }
 
 export function formatAgentReply(result: DirectSendResult): string {
@@ -198,4 +335,8 @@ export function formatAgentReply(result: DirectSendResult): string {
 
 function isDirectAgent(value: string | undefined): value is DirectAgent {
   return value === "codex" || value === "claude";
+}
+
+function shouldBypassXcheck(text: string): boolean {
+  return text.trim().startsWith("/");
 }
