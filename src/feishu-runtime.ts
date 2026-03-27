@@ -1,4 +1,5 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import {
   buildDirectSessionEntryText,
   buildNoActiveTargetText,
@@ -13,6 +14,7 @@ export type FeishuEnv = {
   appId: string;
   appSecret: string;
   domain: string;
+  proxy: string | null;
   allowedUserIds: string[];
   allowedChatIds: string[];
 };
@@ -47,13 +49,18 @@ export async function startFeishuBot(env = readFeishuEnv()): Promise<void> {
     domain,
     loggerLevel: Lark.LoggerLevel.warn,
   });
-  const wsClient = new Lark.WSClient({
+  const wsClientParams: ConstructorParameters<typeof Lark.WSClient>[0] = {
     appId: env.appId,
     appSecret: env.appSecret,
     domain,
     loggerLevel: Lark.LoggerLevel.warn,
     autoReconnect: true,
-  });
+  };
+  const wsProxyAgent = createFeishuProxyAgent(env.proxy);
+  if (wsProxyAgent) {
+    wsClientParams.agent = wsProxyAgent;
+  }
+  const wsClient = new Lark.WSClient(wsClientParams);
   const cocoHandlers = createCocoCommandHandlers({
     deps: {
       bind: (chatKey, agent, sessionId, cwd) => directSessions.bind(chatKey, agent, sessionId, cwd),
@@ -118,6 +125,7 @@ export function readFeishuEnv(): FeishuEnv {
     appId,
     appSecret,
     domain: process.env.COCO_FEISHU_DOMAIN?.trim() || "feishu",
+    proxy: readFeishuProxy(process.env),
     allowedUserIds: parseCsv(process.env.COCO_FEISHU_USERS),
     allowedChatIds: parseCsv(process.env.COCO_FEISHU_CHATS),
   };
@@ -128,6 +136,23 @@ export function resolveFeishuDomain(domain: string): string | Lark.Domain {
   if (!normalized || normalized === "feishu") return Lark.Domain.Feishu;
   if (normalized === "lark") return Lark.Domain.Lark;
   return domain;
+}
+
+export function readFeishuProxy(env: NodeJS.ProcessEnv): string | null {
+  return firstNonEmptyString(
+    env.COCO_FEISHU_PROXY,
+    env.HTTPS_PROXY,
+    env.HTTP_PROXY,
+    env.ALL_PROXY,
+    env.https_proxy,
+    env.http_proxy,
+    env.all_proxy,
+  );
+}
+
+export function createFeishuProxyAgent(proxy: string | null): HttpsProxyAgent<string> | null {
+  if (!proxy) return null;
+  return new HttpsProxyAgent(proxy);
 }
 
 export function extractInboundMessage(
@@ -255,6 +280,16 @@ function parseCsv(input: string | undefined): string[] {
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function firstNonEmptyString(...values: Array<string | undefined | null>): string | null {
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+  return null;
 }
 
 function safeParseJson(input: string): Record<string, unknown> | null {

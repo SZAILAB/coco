@@ -12,6 +12,7 @@
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "grammy": "^1.41.1",
+    "https-proxy-agent": "^8.0.0",
     "node-pty": "^1.0.0"
   },
   "devDependencies": {

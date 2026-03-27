@@ -1,8 +1,10 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { describe, expect, it } from "vitest";
 import {
+  createFeishuProxyAgent,
   extractInboundMessage,
   parseFeishuMessageText,
+  readFeishuProxy,
   resolveFeishuDomain,
 } from "./feishu-runtime.js";
 
@@ -72,5 +74,32 @@ describe("feishu runtime", () => {
     expect(resolveFeishuDomain("feishu")).toBe(Lark.Domain.Feishu);
     expect(resolveFeishuDomain("lark")).toBe(Lark.Domain.Lark);
     expect(resolveFeishuDomain("https://custom.example")).toBe("https://custom.example");
+  });
+
+  it("prefers explicit feishu proxy env", () => {
+    expect(
+      readFeishuProxy({
+        COCO_FEISHU_PROXY: "http://explicit-proxy:7890",
+        HTTPS_PROXY: "http://https-proxy:8080",
+      }),
+    ).toBe("http://explicit-proxy:7890");
+  });
+
+  it("falls back to standard proxy envs", () => {
+    expect(
+      readFeishuProxy({
+        HTTPS_PROXY: " http://https-proxy:8080 ",
+      }),
+    ).toBe("http://https-proxy:8080");
+    expect(
+      readFeishuProxy({
+        http_proxy: "http://lowercase-proxy:8080",
+      }),
+    ).toBe("http://lowercase-proxy:8080");
+  });
+
+  it("creates a websocket proxy agent when proxy is configured", () => {
+    expect(createFeishuProxyAgent(null)).toBeNull();
+    expect(createFeishuProxyAgent("http://127.0.0.1:7890")).toBeTruthy();
   });
 });

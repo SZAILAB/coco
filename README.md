@@ -87,8 +87,11 @@ npm run feishu
 可选环境变量：
 
 - `COCO_FEISHU_DOMAIN`
+- `COCO_FEISHU_PROXY`
 - `COCO_FEISHU_USERS`
 - `COCO_FEISHU_CHATS`
+
+如果你的机器访问飞书开放平台需要走代理，设置 `COCO_FEISHU_PROXY` 即可。未设置时，运行时会回退读取标准代理环境变量（如 `HTTPS_PROXY` / `ALL_PROXY`）。
 
 启动成功后，终端会看到：
 
