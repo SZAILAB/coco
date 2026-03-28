@@ -1,4 +1,7 @@
+import { loadLocalEnvFiles } from "./load-local-env.js";
 import { startFeishuBot } from "./feishu-runtime.js";
+
+loadLocalEnvFiles();
 
 try {
   await startFeishuBot();

@@ -84,6 +84,17 @@ COCO_FEISHU_APP_SECRET=你的_app_secret \
 npm run feishu
 ```
 
+也可以先复制示例文件，再把配置写进仓库根目录下的 `.env.local`。`npm run feishu` 会自动加载 `.env` 和 `.env.local`：
+
+```bash
+cp .env.local.example .env.local
+```
+
+```dotenv
+COCO_FEISHU_APP_ID=你的_app_id
+COCO_FEISHU_APP_SECRET=你的_app_secret
+```
+
 可选环境变量：
 
 - `COCO_FEISHU_DOMAIN`
