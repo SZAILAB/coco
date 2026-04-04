@@ -30,7 +30,8 @@
 - 不做 session list
 - binding 目前还是**进程内状态**
   - bot 重启后需要重新 bind
-- `xcheck` 目前是固定三段式
+- `xcheck` 目前是**有限轮数**模式
+  - 默认 1 轮
   - 不做无限互评
   - 不做自动 hard timeout
 
@@ -101,8 +102,19 @@ COCO_FEISHU_APP_SECRET=你的_app_secret
 - `COCO_FEISHU_PROXY`
 - `COCO_FEISHU_USERS`
 - `COCO_FEISHU_CHATS`
+- `COCO_CODEX_RESUME_MAX_ATTEMPTS`
+- `COCO_CODEX_RESUME_RETRY_DELAY_MS`
 
 如果你的机器访问飞书开放平台需要走代理，设置 `COCO_FEISHU_PROXY` 即可。未设置时，运行时会回退读取标准代理环境变量（如 `HTTPS_PROXY` / `ALL_PROXY`）。
+
+如果你经常通过飞书继续 Codex，会话转发现在会对**瞬时传输失败**做一次保守重试：
+
+- 默认总尝试次数是 `5`（首次 + 4 次重试）
+- 默认重试等待 `3000ms`
+- 只有在 Codex 还**没有输出任何 assistant 文本**时才会自动重试
+- 一旦已经开始产出文本，`coco` 不会自动重放这条消息，避免把同一条 prompt 发两次
+
+如果你想关闭这层自动重试，可以把 `COCO_CODEX_RESUME_MAX_ATTEMPTS=1`。
 
 启动成功后，终端会看到：
 
@@ -135,7 +147,7 @@ npm run telegram
 - 所有 `/coco ...` 会被 bot 拦截
 - 其他所有消息都会发给当前 active target
 - 这也包括 agent 自己的 slash command，比如 `/compact`
-- 如果 `xcheck` 已开启，普通消息会走 `owner draft -> reviewer review -> owner final`
+- 如果 `xcheck` 已开启，普通消息会走 `owner draft <-> reviewer review` 的有限轮数流程，最后再由 owner 输出 final
 - 但像 `/compact` 这样的 agent slash command 仍然会直接发给当前 active target，不走 `xcheck`
 
 如果当前 chat 里还没有 active target：
@@ -215,12 +227,13 @@ npm run telegram
 
 不带参数时，默认 detach 当前 active target。
 
-### 8. `/coco xcheck on`
+### 8. `/coco xcheck on [rounds]`
 
-开启固定三段式 cross-check：
+开启有限轮数的 cross-check：
 
 ```text
 /coco xcheck on
+/coco xcheck on 10
 ```
 
 前提：
@@ -233,12 +246,15 @@ npm run telegram
 - `owner = 当前 active target`
 - `reviewer = 另一侧 agent`
 
-每条普通消息都会执行一轮：
+默认 `rounds = 1`。
+
+每条普通消息都会执行一轮完整 `xcheck`：
 
 1. 用户消息发给 owner
-2. owner 输出 draft
-3. reviewer 基于 draft 输出 review
-4. owner 基于 review 输出 final
+2. owner 输出第 1 版 draft
+3. reviewer 基于当前 draft 输出 review
+4. 如果还有剩余轮数，owner 基于 review 再出下一版 draft，继续往返
+5. 最后一轮 review 之后，owner 输出 final
 
 这一轮结束后，下一条普通消息才会再次触发新一轮。
 
@@ -264,7 +280,9 @@ npm run telegram
 
 - 是否开启
 - 当前 owner / reviewer
+- 配置的 rounds
 - 当前 run 是 `idle` 还是 `running`
+- 如果正在运行，当前进行到第几轮
 - 如果正在运行，当前停在哪个 step
 - 是否已经请求 stop
 - 最近一次错误
@@ -316,19 +334,25 @@ npm run telegram
 
 这是目前最接近你真实工作流的使用方式。
 
-### 场景 4：固定三段式 xcheck
+### 场景 4：多轮 xcheck
 
 ```text
 /coco bind codex <thread_id> <cwd>
 /coco bind claude <session_id> <cwd>
 /coco use codex
-/coco xcheck on
+/coco xcheck on 10
 帮我把这个改动方案写完整
 ```
 
-这时 bot 会依次回：
+这时 bot 会按轮数来回输出，例如：
 
 ```text
+[codex draft <thread_id>]
+...
+
+[claude review <session_id>]
+...
+
 [codex draft <thread_id>]
 ...
 

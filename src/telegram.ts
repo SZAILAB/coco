@@ -28,7 +28,7 @@ const cocoHandlers = createCocoCommandHandlers({
     sendToActive: (chatKey, text, options) => directSessions.sendToActive(chatKey, text, options),
     current: (chatKey) => directSessions.current(chatKey),
     detach: (chatKey, agent) => directSessions.detach(chatKey, agent),
-    xcheckOn: (chatKey) => directSessions.xcheckOn(chatKey),
+    xcheckOn: (chatKey, rounds) => directSessions.xcheckOn(chatKey, rounds),
     xcheckOff: (chatKey) => directSessions.xcheckOff(chatKey),
     xcheckStop: (chatKey) => directSessions.xcheckStop(chatKey),
   },

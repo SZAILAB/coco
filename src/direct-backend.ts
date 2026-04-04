@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 
 export type DirectAgent = "codex" | "claude";
 export type DirectBindingStatus = "ready" | "busy" | "error" | "exited";
+type SpawnProcess = typeof spawn;
 
 export type DirectSendResult = {
   agent: DirectAgent;
@@ -22,6 +23,21 @@ export interface DirectBinding {
   send(prompt: string): Promise<DirectSendResult>;
   close(): Promise<void>;
 }
+
+const DEFAULT_CODEX_RESUME_MAX_ATTEMPTS = 5;
+const DEFAULT_CODEX_RESUME_RETRY_DELAY_MS = 3_000;
+const directBackendRuntime: { spawn: SpawnProcess } = {
+  spawn,
+};
+
+export const directBackendTesting = {
+  setSpawn(spawnImpl: SpawnProcess): void {
+    directBackendRuntime.spawn = spawnImpl;
+  },
+  reset(): void {
+    directBackendRuntime.spawn = spawn;
+  },
+};
 
 export async function createDirectBinding(
   agent: DirectAgent,
@@ -330,8 +346,47 @@ async function runCodexResumeTurn(
   sessionId: string,
   prompt: string,
 ): Promise<DirectSendResult> {
+  let currentSessionId = sessionId;
+  const maxAttempts = readPositiveIntEnv(
+    process.env.COCO_CODEX_RESUME_MAX_ATTEMPTS,
+    DEFAULT_CODEX_RESUME_MAX_ATTEMPTS,
+  );
+  const retryDelayMs = readPositiveIntEnv(
+    process.env.COCO_CODEX_RESUME_RETRY_DELAY_MS,
+    DEFAULT_CODEX_RESUME_RETRY_DELAY_MS,
+  );
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await runCodexResumeTurnOnce(cwd, currentSessionId, prompt);
+    } catch (err) {
+      const normalized = toCodexResumeTurnError(err, currentSessionId);
+      currentSessionId = normalized.sessionId;
+
+      if (!normalized.retryable || attempt >= maxAttempts) {
+        if (attempt === 1) {
+          throw normalized;
+        }
+        throw new Error(`codex transport failed after ${attempt} attempts: ${normalized.message}`);
+      }
+
+      console.warn(
+        `[codex] transient resume failure for ${currentSessionId} (attempt ${attempt}/${maxAttempts}), retrying in ${retryDelayMs}ms: ${normalized.message}`,
+      );
+      await delay(retryDelayMs);
+    }
+  }
+
+  throw new Error("codex transport failed before any resume attempt completed");
+}
+
+async function runCodexResumeTurnOnce(
+  cwd: string,
+  sessionId: string,
+  prompt: string,
+): Promise<DirectSendResult> {
   return await new Promise<DirectSendResult>((resolve, reject) => {
-    const child = spawn(
+    const child = directBackendRuntime.spawn(
       "codex",
       [
         "exec",
@@ -351,7 +406,8 @@ async function runCodexResumeTurn(
     let stderr = "";
     let currentSessionId = sessionId;
     let done = false;
-    let failure: string | null = null;
+    let turnFailure: string | null = null;
+    let streamError: string | null = null;
     const pendingTexts: string[] = [];
 
     const stdout = createInterface({ input: child.stdout });
@@ -385,11 +441,11 @@ async function runCodexResumeTurn(
           done = true;
           break;
         case "turn.failed":
-          failure = extractCodexError(raw) ?? "turn failed";
+          turnFailure = extractCodexError(raw) ?? "turn failed";
           break;
         case "error":
           if (typeof raw.message === "string" && raw.message) {
-            failure = raw.message;
+            streamError = raw.message;
           }
           break;
         default:
@@ -400,25 +456,54 @@ async function runCodexResumeTurn(
     child.stderr.on("data", (chunk: Buffer | string) => {
       stderr += chunk.toString();
     });
-    child.on("error", (err) => reject(err));
+    child.on("error", (err) =>
+      reject(
+        new CodexResumeTurnError(err.message, {
+          retryable: false,
+          sessionId: currentSessionId,
+          hasAssistantOutput: pendingTexts.length > 0,
+        }),
+      ),
+    );
     child.on("close", (code) => {
-      if (failure) {
-        reject(new Error(failure));
+      const hasAssistantOutput = pendingTexts.length > 0;
+      if (turnFailure) {
+        reject(
+          new CodexResumeTurnError(turnFailure, {
+            retryable: isRetryableCodexTransportError(turnFailure, hasAssistantOutput),
+            sessionId: currentSessionId,
+            hasAssistantOutput,
+          }),
+        );
+        return;
+      }
+      if (done) {
+        resolve({
+          agent: "codex",
+          sessionId: currentSessionId,
+          text: pendingTexts.join("\n\n").trim(),
+        });
         return;
       }
       if (code !== 0 && stderr.trim()) {
-        reject(new Error(stderr.trim()));
+        const message = stderr.trim();
+        reject(
+          new CodexResumeTurnError(message, {
+            retryable: isRetryableCodexTransportError(message, hasAssistantOutput),
+            sessionId: currentSessionId,
+            hasAssistantOutput,
+          }),
+        );
         return;
       }
-      if (!done) {
-        reject(new Error(stderr.trim() || `codex exited before turn completion (code=${code})`));
-        return;
-      }
-      resolve({
-        agent: "codex",
-        sessionId: currentSessionId,
-        text: pendingTexts.join("\n\n").trim(),
-      });
+      const message = streamError || stderr.trim() || `codex exited before turn completion (code=${code})`;
+      reject(
+        new CodexResumeTurnError(message, {
+          retryable: isRetryableCodexTransportError(message, hasAssistantOutput),
+          sessionId: currentSessionId,
+          hasAssistantOutput,
+        }),
+      );
     });
   });
 }
@@ -428,7 +513,7 @@ async function spawnClaudeResumeProcess(
   cwd: string,
 ): Promise<ChildProcessWithoutNullStreams> {
   return await new Promise<ChildProcessWithoutNullStreams>((resolve, reject) => {
-    const child = spawn(
+    const child = directBackendRuntime.spawn(
       "claude",
       [
         "--output-format",
@@ -480,6 +565,53 @@ function extractCodexError(raw: Record<string, unknown>): string | null {
   return null;
 }
 
+function isRetryableCodexTransportError(message: string, hasAssistantOutput: boolean): boolean {
+  if (hasAssistantOutput) {
+    return false;
+  }
+
+  return (
+    /stream disconnected before completion/i.test(message) ||
+    /peer closed connection without sending tls close_notify/i.test(message) ||
+    /unexpected eof/i.test(message) ||
+    (/reconnecting\.\.\./i.test(message) && /(io error|transport error|stream disconnected)/i.test(message))
+  );
+}
+
+class CodexResumeTurnError extends Error {
+  readonly retryable: boolean;
+  readonly sessionId: string;
+  readonly hasAssistantOutput: boolean;
+
+  constructor(
+    message: string,
+    options: {
+      retryable: boolean;
+      sessionId: string;
+      hasAssistantOutput: boolean;
+    },
+  ) {
+    super(message);
+    this.name = "CodexResumeTurnError";
+    this.retryable = options.retryable;
+    this.sessionId = options.sessionId;
+    this.hasAssistantOutput = options.hasAssistantOutput;
+  }
+}
+
+function toCodexResumeTurnError(err: unknown, sessionId: string): CodexResumeTurnError {
+  if (err instanceof CodexResumeTurnError) {
+    return err;
+  }
+
+  const message = err instanceof Error ? err.message : String(err);
+  return new CodexResumeTurnError(message, {
+    retryable: false,
+    sessionId,
+    hasAssistantOutput: false,
+  });
+}
+
 function filterEnv(
   env: NodeJS.ProcessEnv,
   ...keysToRemove: string[]
@@ -495,6 +627,18 @@ function filterEnv(
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function readPositiveIntEnv(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 async function assertSessionExists(

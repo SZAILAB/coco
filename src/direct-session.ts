@@ -26,10 +26,12 @@ export type DirectXcheckStep = "owner-draft" | "reviewer-review" | "owner-final"
 
 export type DirectXcheckSnapshot = {
   enabled: boolean;
+  rounds: number;
   owner: DirectAgent | null;
   reviewer: DirectAgent | null;
   runState: "idle" | "running";
   step: DirectXcheckStep | null;
+  round: number | null;
   startedAt: string | null;
   stopRequested: boolean;
   lastError: string | null;
@@ -54,11 +56,14 @@ type DirectChatRuntime = {
   bindings: Partial<Record<DirectAgent, DirectBinding>>;
   xcheck: {
     enabled: boolean;
+    rounds: number;
     run:
       | {
           step: DirectXcheckStep;
           startedAt: number;
           stopRequested: boolean;
+          round: number;
+          totalRounds: number;
         }
       | null;
     lastError: string | null;
@@ -141,11 +146,13 @@ export class DirectSessionManager {
     return await this.#runXcheck(chat, text, options);
   }
 
-  xcheckOn(chatKey: string): DirectChatState {
+  xcheckOn(chatKey: string, rounds = 1): DirectChatState {
     const chat = this.#getOrCreateChat(chatKey);
     this.#assertNoXcheckRun(chat, "enable xcheck");
     this.#requireXcheckPair(chat);
+    assertValidXcheckRounds(rounds);
     chat.xcheck.enabled = true;
+    chat.xcheck.rounds = rounds;
     chat.xcheck.lastError = null;
     return this.current(chatKey);
   }
@@ -282,10 +289,12 @@ export class DirectSessionManager {
       step: "owner-draft",
       startedAt: Date.now(),
       stopRequested: false,
+      round: 1,
+      totalRounds: chat.xcheck.rounds,
     };
 
     try {
-      const draft = await pair.ownerBinding.send(userText);
+      let draft = await pair.ownerBinding.send(userText);
       await this.#pushOutput(
         outputs,
         {
@@ -295,36 +304,64 @@ export class DirectSessionManager {
         },
         options,
       );
-      if (await this.#finalizeStoppedRun(chat, "owner draft", outputs, options)) {
+      if (await this.#finalizeStoppedRun(chat, chat.xcheck.run, outputs, options)) {
         return outputs;
       }
 
-      chat.xcheck.run.step = "reviewer-review";
-      const review = await pair.reviewerBinding.send(buildXcheckReviewPrompt(pair.owner, userText, draft.text));
-      await this.#pushOutput(
-        outputs,
-        {
-          type: "agent",
-          phase: "review",
-          result: review,
-        },
-        options,
-      );
-      if (await this.#finalizeStoppedRun(chat, "reviewer review", outputs, options)) {
-        return outputs;
-      }
+      for (let round = 1; round <= chat.xcheck.rounds; round += 1) {
+        chat.xcheck.run.step = "reviewer-review";
+        chat.xcheck.run.round = round;
+        const review = await pair.reviewerBinding.send(
+          buildXcheckReviewPrompt(pair.owner, userText, draft.text, round, chat.xcheck.rounds),
+        );
+        await this.#pushOutput(
+          outputs,
+          {
+            type: "agent",
+            phase: "review",
+            result: review,
+          },
+          options,
+        );
+        if (await this.#finalizeStoppedRun(chat, chat.xcheck.run, outputs, options)) {
+          return outputs;
+        }
 
-      chat.xcheck.run.step = "owner-final";
-      const final = await pair.ownerBinding.send(buildXcheckFinalPrompt(pair.reviewer, userText, review.text));
-      await this.#pushOutput(
-        outputs,
-        {
-          type: "agent",
-          phase: "final",
-          result: final,
-        },
-        options,
-      );
+        if (round === chat.xcheck.rounds) {
+          chat.xcheck.run.step = "owner-final";
+          const final = await pair.ownerBinding.send(
+            buildXcheckFinalPrompt(pair.reviewer, userText, review.text, round, chat.xcheck.rounds),
+          );
+          await this.#pushOutput(
+            outputs,
+            {
+              type: "agent",
+              phase: "final",
+              result: final,
+            },
+            options,
+          );
+          return outputs;
+        }
+
+        chat.xcheck.run.step = "owner-draft";
+        chat.xcheck.run.round = round + 1;
+        draft = await pair.ownerBinding.send(
+          buildXcheckRevisionPrompt(pair.reviewer, userText, review.text, round + 1, chat.xcheck.rounds),
+        );
+        await this.#pushOutput(
+          outputs,
+          {
+            type: "agent",
+            phase: "draft",
+            result: draft,
+          },
+          options,
+        );
+        if (await this.#finalizeStoppedRun(chat, chat.xcheck.run, outputs, options)) {
+          return outputs;
+        }
+      }
 
       return outputs;
     } catch (err) {
@@ -334,7 +371,7 @@ export class DirectSessionManager {
         outputs,
         {
           type: "system",
-          text: `Xcheck failed during ${formatXcheckStep(step)}: ${err}`,
+          text: `Xcheck failed during ${formatXcheckRunStep(step, chat.xcheck.run?.round, chat.xcheck.run?.totalRounds)}: ${err}`,
         },
         options,
       );
@@ -346,7 +383,7 @@ export class DirectSessionManager {
 
   async #finalizeStoppedRun(
     chat: DirectChatRuntime,
-    completedStep: string,
+    run: NonNullable<DirectChatRuntime["xcheck"]["run"]>,
     outputs: DirectDispatchOutput[],
     options?: DirectDispatchOptions,
   ): Promise<boolean> {
@@ -358,7 +395,7 @@ export class DirectSessionManager {
       outputs,
       {
         type: "system",
-        text: `Xcheck stopped after ${completedStep}.`,
+        text: `Xcheck stopped after ${formatXcheckRunStep(run.step, run.round, run.totalRounds)}.`,
       },
       options,
     );
@@ -369,10 +406,12 @@ export class DirectSessionManager {
     const { owner, reviewer } = this.#participants(chat);
     return {
       enabled: chat.xcheck.enabled,
+      rounds: chat.xcheck.rounds,
       owner,
       reviewer,
       runState: chat.xcheck.run ? "running" : "idle",
       step: chat.xcheck.run?.step ?? null,
+      round: chat.xcheck.run?.round ?? null,
       startedAt: chat.xcheck.run ? new Date(chat.xcheck.run.startedAt).toISOString() : null,
       stopRequested: chat.xcheck.run?.stopRequested ?? false,
       lastError: chat.xcheck.lastError,
@@ -442,10 +481,12 @@ export class DirectSessionManager {
       bindings: {},
       xcheck: {
         enabled: false,
+        rounds: 1,
         owner: null,
         reviewer: null,
         runState: "idle",
         step: null,
+        round: null,
         startedAt: null,
         stopRequested: false,
         lastError: null,
@@ -461,6 +502,7 @@ export class DirectSessionManager {
         bindings: {},
         xcheck: {
           enabled: false,
+          rounds: 1,
           run: null,
           lastError: null,
         },
@@ -473,12 +515,19 @@ export class DirectSessionManager {
 
 export const directSessions = new DirectSessionManager();
 
-function buildXcheckReviewPrompt(owner: DirectAgent, userText: string, draft: string): string {
+function buildXcheckReviewPrompt(
+  owner: DirectAgent,
+  userText: string,
+  draft: string,
+  round: number,
+  totalRounds: number,
+): string {
   return [
     "Cross-check mode: review the other agent's draft only.",
     "Do not answer the user directly.",
     "Point out concrete mistakes, risks, or missing edge cases.",
     "",
+    `Round: ${round}/${totalRounds}`,
     `Owner: ${owner}`,
     "Original user message:",
     userText,
@@ -488,12 +537,42 @@ function buildXcheckReviewPrompt(owner: DirectAgent, userText: string, draft: st
   ].join("\n");
 }
 
-function buildXcheckFinalPrompt(reviewer: DirectAgent, userText: string, review: string): string {
+function buildXcheckRevisionPrompt(
+  reviewer: DirectAgent,
+  userText: string,
+  review: string,
+  round: number,
+  totalRounds: number,
+): string {
+  return [
+    "Cross-check mode: revise your previous draft using the review below.",
+    "Return an updated draft only.",
+    "Do not return the final user-facing answer yet.",
+    "Another review round will follow after this draft.",
+    "",
+    `Round: ${round}/${totalRounds}`,
+    `Reviewer: ${reviewer}`,
+    "Original user message:",
+    userText,
+    "",
+    "Reviewer feedback:",
+    review,
+  ].join("\n");
+}
+
+function buildXcheckFinalPrompt(
+  reviewer: DirectAgent,
+  userText: string,
+  review: string,
+  round: number,
+  totalRounds: number,
+): string {
   return [
     "Cross-check mode: revise your previous draft using the review below.",
     "Return the final user-facing answer.",
     "Incorporate good feedback and ignore bad feedback if needed.",
     "",
+    `Final round: ${round}/${totalRounds}`,
     `Reviewer: ${reviewer}`,
     "Original user message:",
     userText,
@@ -511,5 +590,23 @@ function formatXcheckStep(step: DirectXcheckStep): string {
       return "reviewer review";
     case "owner-final":
       return "owner final";
+  }
+}
+
+function formatXcheckRunStep(
+  step: DirectXcheckStep,
+  round: number | null | undefined,
+  totalRounds: number | null | undefined,
+): string {
+  const label = formatXcheckStep(step);
+  if (!round || !totalRounds) {
+    return label;
+  }
+  return `${label} (round ${round}/${totalRounds})`;
+}
+
+function assertValidXcheckRounds(rounds: number): void {
+  if (!Number.isInteger(rounds) || rounds < 1) {
+    throw new Error("Xcheck rounds must be a positive integer");
   }
 }

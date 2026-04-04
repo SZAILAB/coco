@@ -16,10 +16,12 @@ function makeState(overrides?: Partial<DirectChatState>): DirectChatState {
     },
     xcheck: {
       enabled: false,
+      rounds: 1,
       owner: "codex",
       reviewer: null,
       runState: "idle",
       step: null,
+      round: null,
       startedAt: null,
       stopRequested: false,
       lastError: null,
@@ -50,6 +52,11 @@ describe("coco direct commands", () => {
     expect(parseCocoCommand("/coco xcheck status")).toEqual({
       name: "xcheck",
       action: "status",
+    });
+    expect(parseCocoCommand("/coco xcheck on 10")).toEqual({
+      name: "xcheck",
+      action: "on",
+      rounds: 10,
     });
   });
 
@@ -103,10 +110,12 @@ describe("coco direct commands", () => {
             },
             xcheck: {
               enabled: true,
+              rounds: 10,
               owner: "codex",
               reviewer: "claude",
               runState: "idle",
               step: null,
+              round: null,
               startedAt: null,
               stopRequested: false,
               lastError: null,
@@ -114,7 +123,7 @@ describe("coco direct commands", () => {
           }),
         ),
         detach: vi.fn(),
-        xcheckOn: vi.fn(() =>
+        xcheckOn: vi.fn((_chatKey, rounds) =>
           makeState({
             bindings: {
               codex: makeState().bindings.codex,
@@ -128,10 +137,12 @@ describe("coco direct commands", () => {
             },
             xcheck: {
               enabled: true,
+              rounds: rounds ?? 1,
               owner: "codex",
               reviewer: "claude",
               runState: "idle",
               step: null,
+              round: null,
               startedAt: null,
               stopRequested: false,
               lastError: null,
@@ -145,13 +156,14 @@ describe("coco direct commands", () => {
 
     const handled = await handlers.handleCocoCommand({
       chatKey: "feishu:oc_1",
-      text: "/coco xcheck on",
+      text: "/coco xcheck on 10",
       reply,
     });
 
     expect(handled).toBe(true);
-    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Xcheck mode enabled."));
+    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Xcheck mode enabled for 10 rounds."));
     expect(reply).toHaveBeenCalledWith(expect.stringContaining("Reviewer: claude"));
+    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Rounds: 10"));
   });
 
   it("forwards slash commands to the active session without xcheck", async () => {

@@ -180,6 +180,122 @@ describe("direct session manager", () => {
     );
   });
 
+  it("supports multiple xcheck rounds before the final response", async () => {
+    const codexSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "draft round 1",
+      })
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "draft round 2",
+      })
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "final from codex",
+      });
+    const claudeSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockResolvedValueOnce({
+        agent: "claude",
+        sessionId: "session-1",
+        text: "review round 1",
+      })
+      .mockResolvedValueOnce({
+        agent: "claude",
+        sessionId: "session-1",
+        text: "review round 2",
+      });
+
+    const manager = new DirectSessionManager(async (agent, sessionId) =>
+      createFakeBinding(
+        agent,
+        sessionId,
+        "/tmp/project",
+        agent === "codex" ? codexSend : claudeSend,
+      ),
+    );
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    manager.xcheckOn("chat-1", 2);
+
+    const result = await manager.sendToActive("chat-1", "please fix this");
+
+    expect(result).toEqual([
+      {
+        type: "agent",
+        phase: "draft",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "draft round 1",
+        },
+      },
+      {
+        type: "agent",
+        phase: "review",
+        result: {
+          agent: "claude",
+          sessionId: "session-1",
+          text: "review round 1",
+        },
+      },
+      {
+        type: "agent",
+        phase: "draft",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "draft round 2",
+        },
+      },
+      {
+        type: "agent",
+        phase: "review",
+        result: {
+          agent: "claude",
+          sessionId: "session-1",
+          text: "review round 2",
+        },
+      },
+      {
+        type: "agent",
+        phase: "final",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "final from codex",
+        },
+      },
+    ]);
+    expect(manager.current("chat-1").xcheck.rounds).toBe(2);
+    expect(claudeSend).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("Round: 1/2"),
+    );
+    expect(claudeSend).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("Round: 2/2"),
+    );
+    expect(codexSend).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("Return an updated draft only."),
+    );
+    expect(codexSend).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("Round: 2/2"),
+    );
+    expect(codexSend).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("Final round: 2/2"),
+    );
+  });
+
   it("emits xcheck outputs incrementally as each step completes", async () => {
     let releaseReview: ((value: DirectSendResult) => void) | null = null;
     const seenPhases: string[] = [];
@@ -403,7 +519,7 @@ describe("direct session manager", () => {
       },
       {
         type: "system",
-        text: "Xcheck stopped after owner draft.",
+        text: "Xcheck stopped after owner draft (round 1/1).",
       },
     ]);
     expect(claudeSend).not.toHaveBeenCalled();

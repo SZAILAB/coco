@@ -12,7 +12,7 @@ export type CocoCommandDeps = {
   ): Promise<DirectDispatchOutput[] | null>;
   current(chatKey: string): DirectChatState;
   detach(chatKey: string, agent?: DirectAgent): Promise<DirectChatState>;
-  xcheckOn(chatKey: string): DirectChatState;
+  xcheckOn(chatKey: string, rounds?: number): DirectChatState;
   xcheckOff(chatKey: string): DirectChatState;
   xcheckStop(chatKey: string): DirectChatState;
 };
@@ -34,7 +34,8 @@ type ParsedCocoCommand =
   | { name: "use"; agent: DirectAgent }
   | { name: "ask"; agent: DirectAgent; text: string }
   | { name: "detach"; agent?: DirectAgent }
-  | { name: "xcheck"; action: "on" | "off" | "status" | "stop" };
+  | { name: "xcheck"; action: "on"; rounds: number }
+  | { name: "xcheck"; action: "off" | "status" | "stop" };
 
 export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
   return {
@@ -105,7 +106,7 @@ export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
           return true;
 
         case "xcheck":
-          await handleXcheckCommand(runtime, message, parsed.action);
+          await handleXcheckCommand(runtime, message, parsed);
           return true;
       }
     },
@@ -138,17 +139,22 @@ export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
 async function handleXcheckCommand(
   runtime: CocoCommandRuntime,
   message: CocoCommandMessage,
-  action: "on" | "off" | "status" | "stop",
+  command: Extract<ParsedCocoCommand, { name: "xcheck" }>,
 ): Promise<void> {
-  switch (action) {
+  switch (command.action) {
     case "status":
       await message.reply(formatXcheckState(runtime.deps.current(message.chatKey)));
       return;
 
     case "on":
       try {
-        const state = runtime.deps.xcheckOn(message.chatKey);
-        await message.reply(["Xcheck mode enabled.", formatXcheckState(state)].join("\n\n"));
+        const state = runtime.deps.xcheckOn(message.chatKey, command.rounds);
+        await message.reply(
+          [
+            `Xcheck mode enabled for ${command.rounds} round${command.rounds === 1 ? "" : "s"}.`,
+            formatXcheckState(state),
+          ].join("\n\n"),
+        );
       } catch (err) {
         await message.reply(`Failed to enable xcheck: ${err}`);
       }
@@ -219,7 +225,18 @@ export function parseCocoCommand(text: string): ParsedCocoCommand | null {
       return { name: "detach", agent: rest };
     }
     case "xcheck": {
-      if (rest === "on" || rest === "off" || rest === "status" || rest === "stop") {
+      if (rest === "on") {
+        return { name: "xcheck", action: "on", rounds: 1 };
+      }
+      const onMatch = rest.match(/^on\s+(\d+)$/);
+      if (onMatch) {
+        const rounds = Number.parseInt(onMatch[1] ?? "", 10);
+        if (Number.isInteger(rounds) && rounds > 0) {
+          return { name: "xcheck", action: "on", rounds };
+        }
+        return { name: "help" };
+      }
+      if (rest === "off" || rest === "status" || rest === "stop") {
         return { name: "xcheck", action: rest };
       }
       return { name: "help" };
@@ -238,14 +255,14 @@ export function buildCocoHelpText(): string {
     "/coco ask <codex|claude> <text> - Send one message without switching target",
     "/coco current - Show current bindings and active target",
     "/coco detach [codex|claude] - Detach the active or named binding",
-    "/coco xcheck on - Enable draft, review, final mode for the active target",
+    "/coco xcheck on [rounds] - Enable xcheck mode; default is 1 round",
     "/coco xcheck off - Disable xcheck mode",
     "/coco xcheck status - Show xcheck mode state",
     "/coco xcheck stop - Stop the current xcheck run after the current step",
     "/coco help - This message",
     "",
     "After you bind and /coco use a target, any non-/coco message is forwarded to that session.",
-    "When xcheck is on, normal messages run owner draft -> reviewer review -> owner final.",
+    "When xcheck is on, normal messages run configurable draft/review rounds, then owner final.",
   ].join("\n");
 }
 
@@ -282,13 +299,14 @@ export function formatCurrentState(state: DirectChatState): string {
   }
 
   lines.push(`Xcheck: ${state.xcheck.enabled ? "on" : "off"}`);
+  lines.push(`Xcheck rounds: ${state.xcheck.rounds}`);
   lines.push(
     `Xcheck target: owner=${state.xcheck.owner ?? "none"} reviewer=${state.xcheck.reviewer ?? "none"}`,
   );
   if (state.xcheck.runState === "running") {
     const extra = state.xcheck.stopRequested ? " stop-requested" : "";
     lines.push(
-      `Xcheck run: [running] step=${state.xcheck.step ?? "unknown"} started=${state.xcheck.startedAt ?? "unknown"}${extra}`,
+      `Xcheck run: [running] round=${state.xcheck.round ?? "unknown"}/${state.xcheck.rounds} step=${state.xcheck.step ?? "unknown"} started=${state.xcheck.startedAt ?? "unknown"}${extra}`,
     );
   } else {
     lines.push("Xcheck run: [idle]");
@@ -303,9 +321,13 @@ export function formatCurrentState(state: DirectChatState): string {
 export function formatXcheckState(state: DirectChatState): string {
   const lines = ["Xcheck state:"];
   lines.push(`Enabled: ${state.xcheck.enabled ? "on" : "off"}`);
+  lines.push(`Rounds: ${state.xcheck.rounds}`);
   lines.push(`Owner: ${state.xcheck.owner ?? "none"}`);
   lines.push(`Reviewer: ${state.xcheck.reviewer ?? "none"}`);
   lines.push(`Run: ${state.xcheck.runState}`);
+  if (state.xcheck.round) {
+    lines.push(`Round: ${state.xcheck.round}/${state.xcheck.rounds}`);
+  }
   if (state.xcheck.step) {
     lines.push(`Step: ${state.xcheck.step}`);
   }
