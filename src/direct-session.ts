@@ -9,7 +9,7 @@ import {
 export type DirectDispatchOutput =
   | {
       type: "agent";
-      phase: "default" | "draft" | "review" | "final";
+      phase: "default" | "draft" | "review" | "collab" | "final";
       result: DirectSendResult;
     }
   | {
@@ -18,23 +18,40 @@ export type DirectDispatchOutput =
     };
 
 export type DirectDispatchOptions = {
-  bypassXcheck?: boolean;
+  bypassSessionMode?: boolean;
   onOutput?(output: DirectDispatchOutput): Promise<void> | void;
 };
 
 export type DirectXcheckStep = "owner-draft" | "reviewer-review" | "owner-final";
+export type DirectCollabStep = "lead-draft" | "partner-collab" | "lead-final";
 
-export type DirectXcheckSnapshot = {
+type DirectModeRun<Step extends string> = {
+  step: Step;
+  startedAt: number;
+  stopRequested: boolean;
+  round: number;
+  totalRounds: number;
+};
+
+type DirectModeSnapshot<Step extends string> = {
   enabled: boolean;
   rounds: number;
-  owner: DirectAgent | null;
-  reviewer: DirectAgent | null;
   runState: "idle" | "running";
-  step: DirectXcheckStep | null;
+  step: Step | null;
   round: number | null;
   startedAt: string | null;
   stopRequested: boolean;
   lastError: string | null;
+};
+
+export type DirectXcheckSnapshot = DirectModeSnapshot<DirectXcheckStep> & {
+  owner: DirectAgent | null;
+  reviewer: DirectAgent | null;
+};
+
+export type DirectCollabSnapshot = DirectModeSnapshot<DirectCollabStep> & {
+  lead: DirectAgent | null;
+  partner: DirectAgent | null;
 };
 
 export type DirectBindingSnapshot = {
@@ -49,6 +66,7 @@ export type DirectChatState = {
   activeTarget: DirectAgent | null;
   bindings: Partial<Record<DirectAgent, DirectBindingSnapshot>>;
   xcheck: DirectXcheckSnapshot;
+  collab: DirectCollabSnapshot;
 };
 
 type DirectChatRuntime = {
@@ -58,23 +76,23 @@ type DirectChatRuntime = {
     enabled: boolean;
     rounds: number;
     run:
-      | {
-          step: DirectXcheckStep;
-          startedAt: number;
-          stopRequested: boolean;
-          round: number;
-          totalRounds: number;
-        }
+      | DirectModeRun<DirectXcheckStep>
       | null;
+    lastError: string | null;
+  };
+  collab: {
+    enabled: boolean;
+    rounds: number;
+    run: DirectModeRun<DirectCollabStep> | null;
     lastError: string | null;
   };
 };
 
-type XcheckPair = {
-  owner: DirectAgent;
-  reviewer: DirectAgent;
-  ownerBinding: DirectBinding;
-  reviewerBinding: DirectBinding;
+type DirectPair = {
+  active: DirectAgent;
+  other: DirectAgent;
+  activeBinding: DirectBinding;
+  otherBinding: DirectBinding;
 };
 
 export class DirectSessionManager {
@@ -87,7 +105,7 @@ export class DirectSessionManager {
 
   async bind(chatKey: string, agent: DirectAgent, sessionId: string, cwd: string): Promise<DirectChatState> {
     const chat = this.#getOrCreateChat(chatKey);
-    this.#assertNoXcheckRun(chat, "bind a session");
+    this.#assertNoModeRun(chat, "bind a session");
 
     const existing = chat.bindings[agent];
     if (existing) {
@@ -108,7 +126,7 @@ export class DirectSessionManager {
       throw new Error(`No ${agent} session is bound for this chat`);
     }
 
-    this.#assertNoXcheckRun(chat, "switch the active target");
+    this.#assertNoModeRun(chat, "switch the active target");
     chat.activeTarget = agent;
     return this.current(chatKey);
   }
@@ -120,7 +138,7 @@ export class DirectSessionManager {
       throw new Error(`No ${agent} session is bound for this chat`);
     }
 
-    this.#assertNoXcheckRun(chat, "send a directed message");
+    this.#assertNoModeRun(chat, "send a directed message");
     return await binding.send(text);
   }
 
@@ -132,28 +150,36 @@ export class DirectSessionManager {
     const chat = this.#chats.get(chatKey);
     if (!chat?.activeTarget) return null;
 
-    if (chat.xcheck.run) {
-      return await this.#withSingleOutput({ type: "system", text: "xcheck already running, please wait" }, options);
+    const activeMode = this.#activeModeRun(chat);
+    if (activeMode) {
+      return await this.#withSingleOutput(
+        { type: "system", text: `${activeMode.name} already running, please wait` },
+        options,
+      );
     }
 
     const binding = chat.bindings[chat.activeTarget];
     if (!binding) return null;
 
-    if (options?.bypassXcheck || !chat.xcheck.enabled) {
+    if (options?.bypassSessionMode || (!chat.xcheck.enabled && !chat.collab.enabled)) {
       return await this.#sendDirect(binding, text, options);
     }
 
+    if (chat.collab.enabled) {
+      return await this.#runCollab(chat, text, options);
+    }
     return await this.#runXcheck(chat, text, options);
   }
 
   xcheckOn(chatKey: string, rounds = 1): DirectChatState {
     const chat = this.#getOrCreateChat(chatKey);
-    this.#assertNoXcheckRun(chat, "enable xcheck");
-    this.#requireXcheckPair(chat);
-    assertValidXcheckRounds(rounds);
+    this.#assertNoModeRun(chat, "enable xcheck");
+    this.#requirePair(chat, "Xcheck");
+    assertValidModeRounds(rounds);
     chat.xcheck.enabled = true;
     chat.xcheck.rounds = rounds;
     chat.xcheck.lastError = null;
+    chat.collab.enabled = false;
     return this.current(chatKey);
   }
 
@@ -163,7 +189,7 @@ export class DirectSessionManager {
       return this.#emptyState();
     }
 
-    this.#assertNoXcheckRun(chat, "disable xcheck");
+    this.#assertNoModeRun(chat, "disable xcheck");
     chat.xcheck.enabled = false;
     chat.xcheck.lastError = null;
     return this.current(chatKey);
@@ -174,6 +200,41 @@ export class DirectSessionManager {
     const run = chat?.xcheck.run;
     if (!chat || !run) {
       throw new Error("No xcheck run is currently active for this chat");
+    }
+
+    run.stopRequested = true;
+    return this.current(chatKey);
+  }
+
+  collabOn(chatKey: string, rounds = 1): DirectChatState {
+    const chat = this.#getOrCreateChat(chatKey);
+    this.#assertNoModeRun(chat, "enable collab");
+    this.#requirePair(chat, "Collab");
+    assertValidModeRounds(rounds);
+    chat.collab.enabled = true;
+    chat.collab.rounds = rounds;
+    chat.collab.lastError = null;
+    chat.xcheck.enabled = false;
+    return this.current(chatKey);
+  }
+
+  collabOff(chatKey: string): DirectChatState {
+    const chat = this.#chats.get(chatKey);
+    if (!chat) {
+      return this.#emptyState();
+    }
+
+    this.#assertNoModeRun(chat, "disable collab");
+    chat.collab.enabled = false;
+    chat.collab.lastError = null;
+    return this.current(chatKey);
+  }
+
+  collabStop(chatKey: string): DirectChatState {
+    const chat = this.#chats.get(chatKey);
+    const run = chat?.collab.run;
+    if (!chat || !run) {
+      throw new Error("No collab run is currently active for this chat");
     }
 
     run.stopRequested = true;
@@ -203,6 +264,7 @@ export class DirectSessionManager {
       activeTarget: chat.activeTarget,
       bindings,
       xcheck: this.#snapshotXcheck(chat),
+      collab: this.#snapshotCollab(chat),
     };
   }
 
@@ -212,7 +274,7 @@ export class DirectSessionManager {
       return this.#emptyState();
     }
 
-    this.#assertNoXcheckRun(chat, "detach a session");
+    this.#assertNoModeRun(chat, "detach a session");
 
     const targets = agent
       ? [agent]
@@ -242,6 +304,7 @@ export class DirectSessionManager {
 
     if (!chat.bindings.codex || !chat.bindings.claude || !chat.activeTarget) {
       chat.xcheck.enabled = false;
+      chat.collab.enabled = false;
     }
 
     return this.current(chatKey);
@@ -274,9 +337,9 @@ export class DirectSessionManager {
     userText: string,
     options?: DirectDispatchOptions,
   ): Promise<DirectDispatchOutput[]> {
-    let pair: XcheckPair;
+    let pair: DirectPair;
     try {
-      pair = this.#requireXcheckPair(chat);
+      pair = this.#requirePair(chat, "Xcheck");
     } catch (err) {
       chat.xcheck.enabled = false;
       chat.xcheck.lastError = String(err);
@@ -294,7 +357,7 @@ export class DirectSessionManager {
     };
 
     try {
-      let draft = await pair.ownerBinding.send(userText);
+      let draft = await pair.activeBinding.send(userText);
       await this.#pushOutput(
         outputs,
         {
@@ -304,15 +367,23 @@ export class DirectSessionManager {
         },
         options,
       );
-      if (await this.#finalizeStoppedRun(chat, chat.xcheck.run, outputs, options)) {
+      if (
+        await this.#finalizeStoppedRun(
+          chat.xcheck.run,
+          outputs,
+          options,
+          "Xcheck",
+          formatXcheckRunStep,
+        )
+      ) {
         return outputs;
       }
 
       for (let round = 1; round <= chat.xcheck.rounds; round += 1) {
         chat.xcheck.run.step = "reviewer-review";
         chat.xcheck.run.round = round;
-        const review = await pair.reviewerBinding.send(
-          buildXcheckReviewPrompt(pair.owner, userText, draft.text, round, chat.xcheck.rounds),
+        const review = await pair.otherBinding.send(
+          buildXcheckReviewPrompt(pair.active, userText, draft.text, round, chat.xcheck.rounds),
         );
         await this.#pushOutput(
           outputs,
@@ -323,14 +394,22 @@ export class DirectSessionManager {
           },
           options,
         );
-        if (await this.#finalizeStoppedRun(chat, chat.xcheck.run, outputs, options)) {
+        if (
+          await this.#finalizeStoppedRun(
+            chat.xcheck.run,
+            outputs,
+            options,
+            "Xcheck",
+            formatXcheckRunStep,
+          )
+        ) {
           return outputs;
         }
 
         if (round === chat.xcheck.rounds) {
           chat.xcheck.run.step = "owner-final";
-          const final = await pair.ownerBinding.send(
-            buildXcheckFinalPrompt(pair.reviewer, userText, review.text, round, chat.xcheck.rounds),
+          const final = await pair.activeBinding.send(
+            buildXcheckFinalPrompt(pair.other, userText, review.text, round, chat.xcheck.rounds),
           );
           await this.#pushOutput(
             outputs,
@@ -346,8 +425,8 @@ export class DirectSessionManager {
 
         chat.xcheck.run.step = "owner-draft";
         chat.xcheck.run.round = round + 1;
-        draft = await pair.ownerBinding.send(
-          buildXcheckRevisionPrompt(pair.reviewer, userText, review.text, round + 1, chat.xcheck.rounds),
+        draft = await pair.activeBinding.send(
+          buildXcheckRevisionPrompt(pair.other, userText, review.text, round + 1, chat.xcheck.rounds),
         );
         await this.#pushOutput(
           outputs,
@@ -358,7 +437,15 @@ export class DirectSessionManager {
           },
           options,
         );
-        if (await this.#finalizeStoppedRun(chat, chat.xcheck.run, outputs, options)) {
+        if (
+          await this.#finalizeStoppedRun(
+            chat.xcheck.run,
+            outputs,
+            options,
+            "Xcheck",
+            formatXcheckRunStep,
+          )
+        ) {
           return outputs;
         }
       }
@@ -381,13 +468,150 @@ export class DirectSessionManager {
     }
   }
 
-  async #finalizeStoppedRun(
+  async #runCollab(
     chat: DirectChatRuntime,
-    run: NonNullable<DirectChatRuntime["xcheck"]["run"]>,
-    outputs: DirectDispatchOutput[],
+    userText: string,
     options?: DirectDispatchOptions,
+  ): Promise<DirectDispatchOutput[]> {
+    let pair: DirectPair;
+    try {
+      pair = this.#requirePair(chat, "Collab");
+    } catch (err) {
+      chat.collab.enabled = false;
+      chat.collab.lastError = String(err);
+      return await this.#withSingleOutput({ type: "system", text: `Collab was disabled: ${err}` }, options);
+    }
+
+    const outputs: DirectDispatchOutput[] = [];
+    chat.collab.lastError = null;
+    chat.collab.run = {
+      step: "lead-draft",
+      startedAt: Date.now(),
+      stopRequested: false,
+      round: 1,
+      totalRounds: chat.collab.rounds,
+    };
+
+    try {
+      let draft = await pair.activeBinding.send(userText);
+      await this.#pushOutput(
+        outputs,
+        {
+          type: "agent",
+          phase: "draft",
+          result: draft,
+        },
+        options,
+      );
+      if (
+        await this.#finalizeStoppedRun(
+          chat.collab.run,
+          outputs,
+          options,
+          "Collab",
+          formatCollabRunStep,
+        )
+      ) {
+        return outputs;
+      }
+
+      for (let round = 1; round <= chat.collab.rounds; round += 1) {
+        chat.collab.run.step = "partner-collab";
+        chat.collab.run.round = round;
+        const partnerResponse = await pair.otherBinding.send(
+          buildCollabPartnerPrompt(pair.active, userText, draft.text, round, chat.collab.rounds),
+        );
+        await this.#pushOutput(
+          outputs,
+          {
+            type: "agent",
+            phase: "collab",
+            result: partnerResponse,
+          },
+          options,
+        );
+        if (
+          await this.#finalizeStoppedRun(
+            chat.collab.run,
+            outputs,
+            options,
+            "Collab",
+            formatCollabRunStep,
+          )
+        ) {
+          return outputs;
+        }
+
+        if (round === chat.collab.rounds) {
+          chat.collab.run.step = "lead-final";
+          const final = await pair.activeBinding.send(
+            buildCollabFinalPrompt(pair.other, userText, partnerResponse.text, round, chat.collab.rounds),
+          );
+          await this.#pushOutput(
+            outputs,
+            {
+              type: "agent",
+              phase: "final",
+              result: final,
+            },
+            options,
+          );
+          return outputs;
+        }
+
+        chat.collab.run.step = "lead-draft";
+        chat.collab.run.round = round + 1;
+        draft = await pair.activeBinding.send(
+          buildCollabRevisionPrompt(pair.other, userText, partnerResponse.text, round + 1, chat.collab.rounds),
+        );
+        await this.#pushOutput(
+          outputs,
+          {
+            type: "agent",
+            phase: "draft",
+            result: draft,
+          },
+          options,
+        );
+        if (
+          await this.#finalizeStoppedRun(
+            chat.collab.run,
+            outputs,
+            options,
+            "Collab",
+            formatCollabRunStep,
+          )
+        ) {
+          return outputs;
+        }
+      }
+
+      return outputs;
+    } catch (err) {
+      chat.collab.lastError = String(err);
+      const step = chat.collab.run?.step ?? "lead-draft";
+      await this.#pushOutput(
+        outputs,
+        {
+          type: "system",
+          text: `Collab failed during ${formatCollabRunStep(step, chat.collab.run?.round, chat.collab.run?.totalRounds)}: ${err}`,
+        },
+        options,
+      );
+      return outputs;
+    } finally {
+      chat.collab.run = null;
+    }
+  }
+
+  async #finalizeStoppedRun<Step extends string>(
+    run: DirectModeRun<Step> | null,
+    outputs: DirectDispatchOutput[],
+    options: DirectDispatchOptions | undefined,
+    modeName: string,
+    formatStep: (step: Step, round: number | null | undefined, totalRounds: number | null | undefined) => string,
   ): Promise<boolean> {
-    if (!chat.xcheck.run?.stopRequested) {
+    if (!run?.stopRequested) {
       return false;
     }
 
@@ -395,7 +619,7 @@ export class DirectSessionManager {
       outputs,
       {
         type: "system",
-        text: `Xcheck stopped after ${formatXcheckRunStep(run.step, run.round, run.totalRounds)}.`,
+        text: `${modeName} stopped after ${formatStep(run.step, run.round, run.totalRounds)}.`,
       },
       options,
     );
@@ -403,7 +627,7 @@ export class DirectSessionManager {
   }
 
   #snapshotXcheck(chat: DirectChatRuntime): DirectXcheckSnapshot {
-    const { owner, reviewer } = this.#participants(chat);
+    const { active: owner, other: reviewer } = this.#pairedAgents(chat);
     return {
       enabled: chat.xcheck.enabled,
       rounds: chat.xcheck.rounds,
@@ -418,14 +642,30 @@ export class DirectSessionManager {
     };
   }
 
-  #participants(chat: DirectChatRuntime): { owner: DirectAgent | null; reviewer: DirectAgent | null } {
-    const owner = chat.activeTarget;
-    if (!owner) {
-      return { owner: null, reviewer: null };
+  #snapshotCollab(chat: DirectChatRuntime): DirectCollabSnapshot {
+    const { active: lead, other: partner } = this.#pairedAgents(chat);
+    return {
+      enabled: chat.collab.enabled,
+      rounds: chat.collab.rounds,
+      lead,
+      partner,
+      runState: chat.collab.run ? "running" : "idle",
+      step: chat.collab.run?.step ?? null,
+      round: chat.collab.run?.round ?? null,
+      startedAt: chat.collab.run ? new Date(chat.collab.run.startedAt).toISOString() : null,
+      stopRequested: chat.collab.run?.stopRequested ?? false,
+      lastError: chat.collab.lastError,
+    };
+  }
+
+  #pairedAgents(chat: DirectChatRuntime): { active: DirectAgent | null; other: DirectAgent | null } {
+    const active = chat.activeTarget;
+    if (!active) {
+      return { active: null, other: null };
     }
 
-    const reviewer =
-      owner === "codex"
+    const other =
+      active === "codex"
         ? chat.bindings.claude
           ? "claude"
           : null
@@ -433,27 +673,40 @@ export class DirectSessionManager {
           ? "codex"
           : null;
 
-    return { owner, reviewer };
+    return { active, other };
   }
 
-  #requireXcheckPair(chat: DirectChatRuntime): XcheckPair {
-    const { owner, reviewer } = this.#participants(chat);
-    if (!owner || !reviewer) {
-      throw new Error("Xcheck requires both codex and claude to be bound and an active target selected");
+  #requirePair(chat: DirectChatRuntime, modeName: "Xcheck" | "Collab"): DirectPair {
+    const { active, other } = this.#pairedAgents(chat);
+    if (!active || !other) {
+      throw new Error(`${modeName} requires both codex and claude to be bound and an active target selected`);
     }
 
-    const ownerBinding = chat.bindings[owner];
-    const reviewerBinding = chat.bindings[reviewer];
-    if (!ownerBinding || !reviewerBinding) {
-      throw new Error("Xcheck bindings are incomplete for this chat");
+    const activeBinding = chat.bindings[active];
+    const otherBinding = chat.bindings[other];
+    if (!activeBinding || !otherBinding) {
+      throw new Error(`${modeName} bindings are incomplete for this chat`);
     }
 
-    return { owner, reviewer, ownerBinding, reviewerBinding };
+    return { active, other, activeBinding, otherBinding };
   }
 
-  #assertNoXcheckRun(chat: DirectChatRuntime, action: string): void {
+  #activeModeRun(
+    chat: DirectChatRuntime,
+  ): { name: "xcheck"; run: DirectModeRun<DirectXcheckStep> } | { name: "collab"; run: DirectModeRun<DirectCollabStep> } | null {
     if (chat.xcheck.run) {
-      throw new Error(`Cannot ${action} while xcheck is running`);
+      return { name: "xcheck", run: chat.xcheck.run };
+    }
+    if (chat.collab.run) {
+      return { name: "collab", run: chat.collab.run };
+    }
+    return null;
+  }
+
+  #assertNoModeRun(chat: DirectChatRuntime, action: string): void {
+    const activeMode = this.#activeModeRun(chat);
+    if (activeMode) {
+      throw new Error(`Cannot ${action} while ${activeMode.name} is running`);
     }
   }
 
@@ -491,6 +744,18 @@ export class DirectSessionManager {
         stopRequested: false,
         lastError: null,
       },
+      collab: {
+        enabled: false,
+        rounds: 1,
+        lead: null,
+        partner: null,
+        runState: "idle",
+        step: null,
+        round: null,
+        startedAt: null,
+        stopRequested: false,
+        lastError: null,
+      },
     };
   }
 
@@ -501,6 +766,12 @@ export class DirectSessionManager {
         activeTarget: null,
         bindings: {},
         xcheck: {
+          enabled: false,
+          rounds: 1,
+          run: null,
+          lastError: null,
+        },
+        collab: {
           enabled: false,
           rounds: 1,
           run: null,
@@ -582,6 +853,72 @@ function buildXcheckFinalPrompt(
   ].join("\n");
 }
 
+function buildCollabPartnerPrompt(
+  lead: DirectAgent,
+  userText: string,
+  draft: string,
+  round: number,
+  totalRounds: number,
+): string {
+  return [
+    "Collaboration mode: help improve the other agent's current draft.",
+    "Do more than critique: add missing ideas, better approaches, risks, or clearer wording.",
+    "Return your collaborative response only, not the final user-facing answer.",
+    "",
+    `Round: ${round}/${totalRounds}`,
+    `Lead: ${lead}`,
+    "Original user message:",
+    userText,
+    "",
+    "Current draft:",
+    draft,
+  ].join("\n");
+}
+
+function buildCollabRevisionPrompt(
+  partner: DirectAgent,
+  userText: string,
+  partnerResponse: string,
+  round: number,
+  totalRounds: number,
+): string {
+  return [
+    "Collaboration mode: refine your draft using your partner's contribution below.",
+    "Return an updated draft only.",
+    "Do not return the final user-facing answer yet.",
+    "Another collaboration round will follow after this draft.",
+    "",
+    `Round: ${round}/${totalRounds}`,
+    `Partner: ${partner}`,
+    "Original user message:",
+    userText,
+    "",
+    "Partner contribution:",
+    partnerResponse,
+  ].join("\n");
+}
+
+function buildCollabFinalPrompt(
+  partner: DirectAgent,
+  userText: string,
+  partnerResponse: string,
+  round: number,
+  totalRounds: number,
+): string {
+  return [
+    "Collaboration mode: produce the final user-facing answer using your partner's contribution below.",
+    "Adopt strong ideas, ignore weak ones, and keep the answer coherent.",
+    "",
+    `Final round: ${round}/${totalRounds}`,
+    `Partner: ${partner}`,
+    "Original user message:",
+    userText,
+    "",
+    "Partner contribution:",
+    partnerResponse,
+  ].join("\n");
+}
+
 function formatXcheckStep(step: DirectXcheckStep): string {
   switch (step) {
     case "owner-draft":
@@ -590,6 +927,17 @@ function formatXcheckStep(step: DirectXcheckStep): string {
       return "reviewer review";
     case "owner-final":
       return "owner final";
+  }
+}
+
+function formatCollabStep(step: DirectCollabStep): string {
+  switch (step) {
+    case "lead-draft":
+      return "lead draft";
+    case "partner-collab":
+      return "partner collab";
+    case "lead-final":
+      return "lead final";
   }
 }
 
@@ -605,8 +953,20 @@ function formatXcheckRunStep(
   return `${label} (round ${round}/${totalRounds})`;
 }
 
-function assertValidXcheckRounds(rounds: number): void {
+function formatCollabRunStep(
+  step: DirectCollabStep,
+  round: number | null | undefined,
+  totalRounds: number | null | undefined,
+): string {
+  const label = formatCollabStep(step);
+  if (!round || !totalRounds) {
+    return label;
+  }
+  return `${label} (round ${round}/${totalRounds})`;
+}
+
+function assertValidModeRounds(rounds: number): void {
   if (!Number.isInteger(rounds) || rounds < 1) {
-    throw new Error("Xcheck rounds must be a positive integer");
+    throw new Error("Rounds must be a positive integer");
   }
 }

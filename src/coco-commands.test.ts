@@ -26,12 +26,24 @@ function makeState(overrides?: Partial<DirectChatState>): DirectChatState {
       stopRequested: false,
       lastError: null,
     },
+    collab: {
+      enabled: false,
+      rounds: 1,
+      lead: "codex",
+      partner: null,
+      runState: "idle",
+      step: null,
+      round: null,
+      startedAt: null,
+      stopRequested: false,
+      lastError: null,
+    },
     ...overrides,
   };
 }
 
 describe("coco direct commands", () => {
-  it("parses bind, ask, and xcheck commands", () => {
+  it("parses bind, ask, xcheck, and collab commands", () => {
     expect(parseCocoCommand("/coco bind codex thread-1 /tmp/project")).toEqual({
       name: "bind",
       agent: "codex",
@@ -58,6 +70,15 @@ describe("coco direct commands", () => {
       action: "on",
       rounds: 10,
     });
+    expect(parseCocoCommand("/coco collab status")).toEqual({
+      name: "collab",
+      action: "status",
+    });
+    expect(parseCocoCommand("/coco collab on 3")).toEqual({
+      name: "collab",
+      action: "on",
+      rounds: 3,
+    });
   });
 
   it("binds a session and reports current state", async () => {
@@ -73,6 +94,9 @@ describe("coco direct commands", () => {
         xcheckOn: vi.fn(() => makeState()),
         xcheckOff: vi.fn(() => makeState({ xcheck: { ...makeState().xcheck, enabled: false } })),
         xcheckStop: vi.fn(() => makeState()),
+        collabOn: vi.fn(() => makeState()),
+        collabOff: vi.fn(() => makeState({ collab: { ...makeState().collab, enabled: false } })),
+        collabStop: vi.fn(() => makeState()),
       },
     });
 
@@ -151,6 +175,9 @@ describe("coco direct commands", () => {
         ),
         xcheckOff: vi.fn(),
         xcheckStop: vi.fn(),
+        collabOn: vi.fn(),
+        collabOff: vi.fn(),
+        collabStop: vi.fn(),
       },
     });
 
@@ -164,6 +191,87 @@ describe("coco direct commands", () => {
     expect(reply).toHaveBeenCalledWith(expect.stringContaining("Xcheck mode enabled for 10 rounds."));
     expect(reply).toHaveBeenCalledWith(expect.stringContaining("Reviewer: claude"));
     expect(reply).toHaveBeenCalledWith(expect.stringContaining("Rounds: 10"));
+  });
+
+  it("enables collab mode", async () => {
+    const reply = vi.fn(async (_text: string) => {});
+    const handlers = createCocoCommandHandlers({
+      deps: {
+        bind: vi.fn(),
+        use: vi.fn(),
+        ask: vi.fn(),
+        sendToActive: vi.fn(),
+        current: vi.fn(() =>
+          makeState({
+            bindings: {
+              codex: makeState().bindings.codex,
+              claude: {
+                agent: "claude",
+                sessionId: "session-1",
+                cwd: "/tmp/project",
+                status: "ready",
+                error: null,
+              },
+            },
+            collab: {
+              enabled: true,
+              rounds: 3,
+              lead: "codex",
+              partner: "claude",
+              runState: "idle",
+              step: null,
+              round: null,
+              startedAt: null,
+              stopRequested: false,
+              lastError: null,
+            },
+          }),
+        ),
+        detach: vi.fn(),
+        xcheckOn: vi.fn(),
+        xcheckOff: vi.fn(),
+        xcheckStop: vi.fn(),
+        collabOn: vi.fn((_chatKey, rounds) =>
+          makeState({
+            bindings: {
+              codex: makeState().bindings.codex,
+              claude: {
+                agent: "claude",
+                sessionId: "session-1",
+                cwd: "/tmp/project",
+                status: "ready",
+                error: null,
+              },
+            },
+            collab: {
+              enabled: true,
+              rounds: rounds ?? 1,
+              lead: "codex",
+              partner: "claude",
+              runState: "idle",
+              step: null,
+              round: null,
+              startedAt: null,
+              stopRequested: false,
+              lastError: null,
+            },
+          }),
+        ),
+        collabOff: vi.fn(),
+        collabStop: vi.fn(),
+      },
+    });
+
+    const handled = await handlers.handleCocoCommand({
+      chatKey: "feishu:oc_1",
+      text: "/coco collab on 3",
+      reply,
+    });
+
+    expect(handled).toBe(true);
+    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Collab mode enabled for 3 rounds."));
+    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Lead: codex"));
+    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Partner: claude"));
   });
 
   it("forwards slash commands to the active session without xcheck", async () => {
@@ -190,6 +298,9 @@ describe("coco direct commands", () => {
         xcheckOn: vi.fn(),
         xcheckOff: vi.fn(),
         xcheckStop: vi.fn(),
+        collabOn: vi.fn(),
+        collabOff: vi.fn(),
+        collabStop: vi.fn(),
       },
     });
 
@@ -205,7 +316,7 @@ describe("coco direct commands", () => {
       "feishu:oc_1",
       "/compact",
       expect.objectContaining({
-        bypassXcheck: true,
+        bypassSessionMode: true,
         onOutput: expect.any(Function),
       }),
     );
@@ -258,6 +369,9 @@ describe("coco direct commands", () => {
         xcheckOn: vi.fn(),
         xcheckOff: vi.fn(),
         xcheckStop: vi.fn(),
+        collabOn: vi.fn(),
+        collabOff: vi.fn(),
+        collabStop: vi.fn(),
       },
     });
 

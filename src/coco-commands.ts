@@ -15,6 +15,9 @@ export type CocoCommandDeps = {
   xcheckOn(chatKey: string, rounds?: number): DirectChatState;
   xcheckOff(chatKey: string): DirectChatState;
   xcheckStop(chatKey: string): DirectChatState;
+  collabOn(chatKey: string, rounds?: number): DirectChatState;
+  collabOff(chatKey: string): DirectChatState;
+  collabStop(chatKey: string): DirectChatState;
 };
 
 export type CocoCommandRuntime = {
@@ -35,7 +38,9 @@ type ParsedCocoCommand =
   | { name: "ask"; agent: DirectAgent; text: string }
   | { name: "detach"; agent?: DirectAgent }
   | { name: "xcheck"; action: "on"; rounds: number }
-  | { name: "xcheck"; action: "off" | "status" | "stop" };
+  | { name: "xcheck"; action: "off" | "status" | "stop" }
+  | { name: "collab"; action: "on"; rounds: number }
+  | { name: "collab"; action: "off" | "status" | "stop" };
 
 export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
   return {
@@ -108,6 +113,10 @@ export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
         case "xcheck":
           await handleXcheckCommand(runtime, message, parsed);
           return true;
+
+        case "collab":
+          await handleCollabCommand(runtime, message, parsed);
+          return true;
       }
     },
 
@@ -115,7 +124,7 @@ export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
       try {
         let emitted = false;
         const result = await runtime.deps.sendToActive(message.chatKey, message.text, {
-          bypassXcheck: shouldBypassXcheck(message.text),
+          bypassSessionMode: shouldBypassSessionMode(message.text),
           onOutput: async (output) => {
             emitted = true;
             await message.reply(formatDispatchOutput(output));
@@ -134,6 +143,55 @@ export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
       }
     },
   };
+}
+
+async function handleCollabCommand(
+  runtime: CocoCommandRuntime,
+  message: CocoCommandMessage,
+  command: Extract<ParsedCocoCommand, { name: "collab" }>,
+): Promise<void> {
+  switch (command.action) {
+    case "status":
+      await message.reply(formatCollabState(runtime.deps.current(message.chatKey)));
+      return;
+
+    case "on":
+      try {
+        const state = runtime.deps.collabOn(message.chatKey, command.rounds);
+        await message.reply(
+          [
+            `Collab mode enabled for ${command.rounds} round${command.rounds === 1 ? "" : "s"}.`,
+            formatCollabState(state),
+          ].join("\n\n"),
+        );
+      } catch (err) {
+        await message.reply(`Failed to enable collab: ${err}`);
+      }
+      return;
+
+    case "off":
+      try {
+        const state = runtime.deps.collabOff(message.chatKey);
+        await message.reply(["Collab mode disabled.", formatCollabState(state)].join("\n\n"));
+      } catch (err) {
+        await message.reply(`Failed to disable collab: ${err}`);
+      }
+      return;
+
+    case "stop":
+      try {
+        const state = runtime.deps.collabStop(message.chatKey);
+        await message.reply(
+          [
+            "Stopping the current collab run after the current step finishes.",
+            formatCollabState(state),
+          ].join("\n\n"),
+        );
+      } catch (err) {
+        await message.reply(`Failed to stop collab: ${err}`);
+      }
+      return;
+  }
 }
 
 async function handleXcheckCommand(
@@ -241,6 +299,23 @@ export function parseCocoCommand(text: string): ParsedCocoCommand | null {
       }
       return { name: "help" };
     }
+    case "collab": {
+      if (rest === "on") {
+        return { name: "collab", action: "on", rounds: 1 };
+      }
+      const onMatch = rest.match(/^on\s+(\d+)$/);
+      if (onMatch) {
+        const rounds = Number.parseInt(onMatch[1] ?? "", 10);
+        if (Number.isInteger(rounds) && rounds > 0) {
+          return { name: "collab", action: "on", rounds };
+        }
+        return { name: "help" };
+      }
+      if (rest === "off" || rest === "status" || rest === "stop") {
+        return { name: "collab", action: rest };
+      }
+      return { name: "help" };
+    }
     default:
       return { name: "help" };
   }
@@ -259,10 +334,15 @@ export function buildCocoHelpText(): string {
     "/coco xcheck off - Disable xcheck mode",
     "/coco xcheck status - Show xcheck mode state",
     "/coco xcheck stop - Stop the current xcheck run after the current step",
+    "/coco collab on [rounds] - Enable collab mode; default is 1 round",
+    "/coco collab off - Disable collab mode",
+    "/coco collab status - Show collab mode state",
+    "/coco collab stop - Stop the current collab run after the current step",
     "/coco help - This message",
     "",
     "After you bind and /coco use a target, any non-/coco message is forwarded to that session.",
     "When xcheck is on, normal messages run configurable draft/review rounds, then owner final.",
+    "When collab is on, normal messages run configurable lead/partner collaboration rounds, then lead final.",
   ].join("\n");
 }
 
@@ -315,6 +395,23 @@ export function formatCurrentState(state: DirectChatState): string {
     lines.push(`Xcheck last error: ${state.xcheck.lastError}`);
   }
 
+  lines.push(`Collab: ${state.collab.enabled ? "on" : "off"}`);
+  lines.push(`Collab rounds: ${state.collab.rounds}`);
+  lines.push(
+    `Collab target: lead=${state.collab.lead ?? "none"} partner=${state.collab.partner ?? "none"}`,
+  );
+  if (state.collab.runState === "running") {
+    const extra = state.collab.stopRequested ? " stop-requested" : "";
+    lines.push(
+      `Collab run: [running] round=${state.collab.round ?? "unknown"}/${state.collab.rounds} step=${state.collab.step ?? "unknown"} started=${state.collab.startedAt ?? "unknown"}${extra}`,
+    );
+  } else {
+    lines.push("Collab run: [idle]");
+  }
+  if (state.collab.lastError) {
+    lines.push(`Collab last error: ${state.collab.lastError}`);
+  }
+
   return lines.join("\n");
 }
 
@@ -343,6 +440,31 @@ export function formatXcheckState(state: DirectChatState): string {
   return lines.join("\n");
 }
 
+export function formatCollabState(state: DirectChatState): string {
+  const lines = ["Collab state:"];
+  lines.push(`Enabled: ${state.collab.enabled ? "on" : "off"}`);
+  lines.push(`Rounds: ${state.collab.rounds}`);
+  lines.push(`Lead: ${state.collab.lead ?? "none"}`);
+  lines.push(`Partner: ${state.collab.partner ?? "none"}`);
+  lines.push(`Run: ${state.collab.runState}`);
+  if (state.collab.round) {
+    lines.push(`Round: ${state.collab.round}/${state.collab.rounds}`);
+  }
+  if (state.collab.step) {
+    lines.push(`Step: ${state.collab.step}`);
+  }
+  if (state.collab.startedAt) {
+    lines.push(`Started: ${state.collab.startedAt}`);
+  }
+  if (state.collab.stopRequested) {
+    lines.push("Stop Requested: yes");
+  }
+  if (state.collab.lastError) {
+    lines.push(`Last Error: ${state.collab.lastError}`);
+  }
+  return lines.join("\n");
+}
+
 export function formatDispatchOutput(output: DirectDispatchOutput): string {
   if (output.type === "system") {
     return output.text;
@@ -366,6 +488,6 @@ function isDirectAgent(value: string | undefined): value is DirectAgent {
   return value === "codex" || value === "claude";
 }
 
-function shouldBypassXcheck(text: string): boolean {
+function shouldBypassSessionMode(text: string): boolean {
   return text.trim().startsWith("/");
 }

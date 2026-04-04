@@ -109,6 +109,16 @@ describe("direct session manager", () => {
     );
   });
 
+  it("requires both agents before enabling collab", async () => {
+    const manager = new DirectSessionManager(async (agent, sessionId) => createFakeBinding(agent, sessionId));
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+
+    expect(() => manager.collabOn("chat-1")).toThrow(
+      "Collab requires both codex and claude to be bound and an active target selected",
+    );
+  });
+
   it("runs the fixed owner draft reviewer review owner final pipeline", async () => {
     const codexSend = vi
       .fn<(prompt: string) => Promise<DirectSendResult>>()
@@ -289,6 +299,118 @@ describe("direct session manager", () => {
     expect(codexSend).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining("Round: 2/2"),
+    );
+    expect(codexSend).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("Final round: 2/2"),
+    );
+  });
+
+  it("supports multiple collab rounds before the final response", async () => {
+    const codexSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "draft round 1",
+      })
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "draft round 2",
+      })
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "final from codex",
+      });
+    const claudeSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockResolvedValueOnce({
+        agent: "claude",
+        sessionId: "session-1",
+        text: "partner round 1",
+      })
+      .mockResolvedValueOnce({
+        agent: "claude",
+        sessionId: "session-1",
+        text: "partner round 2",
+      });
+
+    const manager = new DirectSessionManager(async (agent, sessionId) =>
+      createFakeBinding(
+        agent,
+        sessionId,
+        "/tmp/project",
+        agent === "codex" ? codexSend : claudeSend,
+      ),
+    );
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    manager.collabOn("chat-1", 2);
+
+    const result = await manager.sendToActive("chat-1", "help me improve this");
+
+    expect(result).toEqual([
+      {
+        type: "agent",
+        phase: "draft",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "draft round 1",
+        },
+      },
+      {
+        type: "agent",
+        phase: "collab",
+        result: {
+          agent: "claude",
+          sessionId: "session-1",
+          text: "partner round 1",
+        },
+      },
+      {
+        type: "agent",
+        phase: "draft",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "draft round 2",
+        },
+      },
+      {
+        type: "agent",
+        phase: "collab",
+        result: {
+          agent: "claude",
+          sessionId: "session-1",
+          text: "partner round 2",
+        },
+      },
+      {
+        type: "agent",
+        phase: "final",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "final from codex",
+        },
+      },
+    ]);
+    expect(manager.current("chat-1").collab.rounds).toBe(2);
+    expect(claudeSend).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("Current draft:\ndraft round 1"),
+    );
+    expect(claudeSend).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("Round: 2/2"),
+    );
+    expect(codexSend).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("Partner contribution:\npartner round 1"),
     );
     expect(codexSend).toHaveBeenNthCalledWith(
       3,
@@ -524,5 +646,85 @@ describe("direct session manager", () => {
     ]);
     expect(claudeSend).not.toHaveBeenCalled();
     expect(manager.current("chat-1").xcheck.runState).toBe("idle");
+  });
+
+  it("stops after the current collab step when stop is requested", async () => {
+    let releaseDraft: ((value: DirectSendResult) => void) | null = null;
+    const codexSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<DirectSendResult>((resolve) => {
+            releaseDraft = resolve;
+          }),
+      );
+    const claudeSend = vi.fn<(prompt: string) => Promise<DirectSendResult>>().mockResolvedValue({
+      agent: "claude",
+      sessionId: "session-1",
+      text: "partner notes",
+    });
+    const manager = new DirectSessionManager(async (agent, sessionId) =>
+      createFakeBinding(
+        agent,
+        sessionId,
+        "/tmp/project",
+        agent === "codex" ? codexSend : claudeSend,
+      ),
+    );
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    manager.collabOn("chat-1");
+
+    const running = manager.sendToActive("chat-1", "first request");
+    const stopState = manager.collabStop("chat-1");
+
+    expect(stopState.collab.runState).toBe("running");
+    expect(stopState.collab.stopRequested).toBe(true);
+
+    if (!releaseDraft) {
+      throw new Error("expected draft resolver to be set");
+    }
+    const resolveDraft = releaseDraft as (value: DirectSendResult) => void;
+    resolveDraft({
+      agent: "codex",
+      sessionId: "thread-1",
+      text: "draft from codex",
+    });
+
+    await expect(running).resolves.toEqual([
+      {
+        type: "agent",
+        phase: "draft",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "draft from codex",
+        },
+      },
+      {
+        type: "system",
+        text: "Collab stopped after lead draft (round 1/1).",
+      },
+    ]);
+    expect(claudeSend).not.toHaveBeenCalled();
+    expect(manager.current("chat-1").collab.runState).toBe("idle");
+  });
+
+  it("keeps xcheck and collab mutually exclusive", async () => {
+    const manager = new DirectSessionManager(async (agent, sessionId) => createFakeBinding(agent, sessionId));
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+
+    const collabState = manager.collabOn("chat-1", 3);
+    expect(collabState.collab.enabled).toBe(true);
+    expect(collabState.collab.rounds).toBe(3);
+    expect(collabState.xcheck.enabled).toBe(false);
+
+    const xcheckState = manager.xcheckOn("chat-1", 2);
+    expect(xcheckState.xcheck.enabled).toBe(true);
+    expect(xcheckState.xcheck.rounds).toBe(2);
+    expect(xcheckState.collab.enabled).toBe(false);
   });
 });

@@ -18,6 +18,7 @@
 - 在两者之间切换默认目标
 - 临时把某一条消息定向发给另一侧 agent
 - 让默认 agent 先起草，再让另一侧 agent review，最后回到默认 agent 出 final
+- 让默认 agent 和另一侧 agent 做有限轮数的对等协作，最后仍由默认 agent 出 final
 
 ## 当前边界
 
@@ -33,6 +34,10 @@
 - `xcheck` 目前是**有限轮数**模式
   - 默认 1 轮
   - 不做无限互评
+  - 不做自动 hard timeout
+- `collab` 目前也是**有限轮数**模式
+  - 默认 1 轮
+  - 不做无限讨论
   - 不做自动 hard timeout
 
 也就是说，当前正确的心智模型是：
@@ -148,7 +153,8 @@ npm run telegram
 - 其他所有消息都会发给当前 active target
 - 这也包括 agent 自己的 slash command，比如 `/compact`
 - 如果 `xcheck` 已开启，普通消息会走 `owner draft <-> reviewer review` 的有限轮数流程，最后再由 owner 输出 final
-- 但像 `/compact` 这样的 agent slash command 仍然会直接发给当前 active target，不走 `xcheck`
+- 如果 `collab` 已开启，普通消息会走 `lead draft <-> partner collab` 的有限轮数流程，最后再由 lead 输出 final
+- 但像 `/compact` 这样的 agent slash command 仍然会直接发给当前 active target，不走 `xcheck` / `collab`
 
 如果当前 chat 里还没有 active target：
 
@@ -245,6 +251,7 @@ npm run telegram
 
 - `owner = 当前 active target`
 - `reviewer = 另一侧 agent`
+- 如果此前 `collab` 是开启状态，会被自动关闭
 
 默认 `rounds = 1`。
 
@@ -298,6 +305,81 @@ npm run telegram
 注意：
 
 - 这不会关闭 `xcheck mode`
+- 它是**协作式停止**
+- 也就是会等当前这一步执行完，再不进入下一步
+
+### 12. `/coco collab on [rounds]`
+
+开启有限轮数的协作模式：
+
+```text
+/coco collab on
+/coco collab on 5
+```
+
+前提：
+
+- 当前 chat 里已经同时绑定 `codex` 和 `claude`
+- 当前已经有 active target
+
+开启后：
+
+- `lead = 当前 active target`
+- `partner = 另一侧 agent`
+- 如果此前 `xcheck` 是开启状态，会被自动关闭
+
+默认 `rounds = 1`。
+
+每条普通消息都会执行一轮完整 `collab`：
+
+1. 用户消息先发给 lead
+2. lead 输出第 1 版 draft
+3. partner 基于当前 draft 给出协作性补充
+4. 如果还有剩余轮数，lead 基于 partner 的补充继续出下一版 draft
+5. 最后一轮 partner 输出后，lead 输出 final
+
+这一轮结束后，下一条普通消息才会再次触发新一轮。
+
+### 13. `/coco collab off`
+
+关闭 `collab` 模式：
+
+```text
+/coco collab off
+```
+
+关闭后，普通消息恢复成只发给当前 active target。
+
+### 14. `/coco collab status`
+
+查看当前 `collab` 状态：
+
+```text
+/coco collab status
+```
+
+它会显示：
+
+- 是否开启
+- 当前 lead / partner
+- 配置的 rounds
+- 当前 run 是 `idle` 还是 `running`
+- 如果正在运行，当前进行到第几轮
+- 如果正在运行，当前停在哪个 step
+- 是否已经请求 stop
+- 最近一次错误
+
+### 15. `/coco collab stop`
+
+停止当前正在执行的这一轮：
+
+```text
+/coco collab stop
+```
+
+注意：
+
+- 这不会关闭 `collab mode`
 - 它是**协作式停止**
 - 也就是会等当前这一步执行完，再不进入下一步
 
@@ -369,6 +451,41 @@ npm run telegram
 xcheck already running, please wait
 ```
 
+### 场景 5：多轮 collab
+
+```text
+/coco bind codex <thread_id> <cwd>
+/coco bind claude <session_id> <cwd>
+/coco use codex
+/coco collab on 3
+帮我把这个方案补强一下，给出一个更完整的最终回答
+```
+
+这时 bot 会按轮数来回输出，例如：
+
+```text
+[codex draft <thread_id>]
+...
+
+[claude collab <session_id>]
+...
+
+[codex draft <thread_id>]
+...
+
+[claude collab <session_id>]
+...
+
+[codex final <thread_id>]
+...
+```
+
+如果这轮还没跑完，你又发了一条普通消息，bot 会提示：
+
+```text
+collab already running, please wait
+```
+
 ## 回复长什么样
 
 bot 回复时会带来源前缀，例如：
@@ -392,6 +509,19 @@ bot 回复时会带来源前缀，例如：
 ...
 
 [claude review 3f101bd8-767e-49fa-94e5-39a2eecbe08c]
+...
+
+[codex final abc123]
+...
+```
+
+`collab` 模式下则会看到：
+
+```text
+[codex draft abc123]
+...
+
+[claude collab 3f101bd8-767e-49fa-94e5-39a2eecbe08c]
 ...
 
 [codex final abc123]

@@ -72,6 +72,9 @@ export async function startFeishuBot(env = readFeishuEnv()): Promise<void> {
       xcheckOn: (chatKey, rounds) => directSessions.xcheckOn(chatKey, rounds),
       xcheckOff: (chatKey) => directSessions.xcheckOff(chatKey),
       xcheckStop: (chatKey) => directSessions.xcheckStop(chatKey),
+      collabOn: (chatKey, rounds) => directSessions.collabOn(chatKey, rounds),
+      collabOff: (chatKey) => directSessions.collabOff(chatKey),
+      collabStop: (chatKey) => directSessions.collabStop(chatKey),
     },
   });
   const recentMessageIds = new Map<string, number>();
