@@ -23,7 +23,7 @@ export type DirectDispatchOptions = {
 };
 
 export type DirectXcheckStep = "owner-draft" | "reviewer-review" | "owner-final";
-export type DirectCollabStep = "lead-draft" | "partner-collab" | "lead-final";
+export type DirectCollabStep = "lead-turn" | "partner-turn";
 
 type DirectModeRun<Step extends string> = {
   step: Step;
@@ -485,7 +485,7 @@ export class DirectSessionManager {
     const outputs: DirectDispatchOutput[] = [];
     chat.collab.lastError = null;
     chat.collab.run = {
-      step: "lead-draft",
+      step: "lead-turn",
       startedAt: Date.now(),
       stopRequested: false,
       round: 1,
@@ -493,83 +493,33 @@ export class DirectSessionManager {
     };
 
     try {
-      let draft = await pair.activeBinding.send(userText);
-      await this.#pushOutput(
-        outputs,
-        {
-          type: "agent",
-          phase: "draft",
-          result: draft,
-        },
-        options,
-      );
-      if (
-        await this.#finalizeStoppedRun(
-          chat.collab.run,
-          outputs,
-          options,
-          "Collab",
-          formatCollabRunStep,
-        )
-      ) {
-        return outputs;
-      }
+      let previousSpeaker = pair.active;
+      let previousText = "";
 
       for (let round = 1; round <= chat.collab.rounds; round += 1) {
-        chat.collab.run.step = "partner-collab";
+        const isLeadTurn = round % 2 === 1;
+        const currentSpeaker = isLeadTurn ? pair.active : pair.other;
+        const currentBinding = isLeadTurn ? pair.activeBinding : pair.otherBinding;
+
+        chat.collab.run.step = isLeadTurn ? "lead-turn" : "partner-turn";
         chat.collab.run.round = round;
-        const partnerResponse = await pair.otherBinding.send(
-          buildCollabPartnerPrompt(pair.active, userText, draft.text, round, chat.collab.rounds),
-        );
+
+        const prompt =
+          round === 1
+            ? userText
+            : round === 2
+              ? buildCollabFirstRelayPrompt(previousSpeaker, userText, previousText)
+              : buildCollabRelayPrompt(previousSpeaker, previousText);
+        const response = await currentBinding.send(prompt);
+        previousSpeaker = currentSpeaker;
+        previousText = response.text;
+
         await this.#pushOutput(
           outputs,
           {
             type: "agent",
             phase: "collab",
-            result: partnerResponse,
-          },
-          options,
-        );
-        if (
-          await this.#finalizeStoppedRun(
-            chat.collab.run,
-            outputs,
-            options,
-            "Collab",
-            formatCollabRunStep,
-          )
-        ) {
-          return outputs;
-        }
-
-        if (round === chat.collab.rounds) {
-          chat.collab.run.step = "lead-final";
-          const final = await pair.activeBinding.send(
-            buildCollabFinalPrompt(pair.other, userText, partnerResponse.text, round, chat.collab.rounds),
-          );
-          await this.#pushOutput(
-            outputs,
-            {
-              type: "agent",
-              phase: "final",
-              result: final,
-            },
-            options,
-          );
-          return outputs;
-        }
-
-        chat.collab.run.step = "lead-draft";
-        chat.collab.run.round = round + 1;
-        draft = await pair.activeBinding.send(
-          buildCollabRevisionPrompt(pair.other, userText, partnerResponse.text, round + 1, chat.collab.rounds),
-        );
-        await this.#pushOutput(
-          outputs,
-          {
-            type: "agent",
-            phase: "draft",
-            result: draft,
+            result: response,
           },
           options,
         );
@@ -589,7 +539,7 @@ export class DirectSessionManager {
       return outputs;
     } catch (err) {
       chat.collab.lastError = String(err);
-      const step = chat.collab.run?.step ?? "lead-draft";
+      const step = chat.collab.run?.step ?? "lead-turn";
       await this.#pushOutput(
         outputs,
         {
@@ -853,69 +803,35 @@ function buildXcheckFinalPrompt(
   ].join("\n");
 }
 
-function buildCollabPartnerPrompt(
-  lead: DirectAgent,
+function buildCollabFirstRelayPrompt(
+  previousSpeaker: DirectAgent,
   userText: string,
-  draft: string,
-  round: number,
-  totalRounds: number,
+  previousMessage: string,
 ): string {
   return [
-    "Collaboration mode: help improve the other agent's current draft.",
-    "Do more than critique: add missing ideas, better approaches, risks, or clearer wording.",
-    "Return your collaborative response only, not the final user-facing answer.",
+    "Collaboration mode.",
     "",
-    `Round: ${round}/${totalRounds}`,
-    `Lead: ${lead}`,
-    "Original user message:",
+    "### Original user message",
     userText,
     "",
-    "Current draft:",
-    draft,
+    `### Previous message from ${previousSpeaker}`,
+    previousMessage,
+    "",
+    "What do you think? Try your best to contribute something useful.",
   ].join("\n");
 }
 
-function buildCollabRevisionPrompt(
-  partner: DirectAgent,
-  userText: string,
-  partnerResponse: string,
-  round: number,
-  totalRounds: number,
+function buildCollabRelayPrompt(
+  previousSpeaker: DirectAgent,
+  previousMessage: string,
 ): string {
   return [
-    "Collaboration mode: refine your draft using your partner's contribution below.",
-    "Return an updated draft only.",
-    "Do not return the final user-facing answer yet.",
-    "Another collaboration round will follow after this draft.",
+    "Collaboration mode.",
     "",
-    `Round: ${round}/${totalRounds}`,
-    `Partner: ${partner}`,
-    "Original user message:",
-    userText,
+    `### Previous message from ${previousSpeaker}`,
+    previousMessage,
     "",
-    "Partner contribution:",
-    partnerResponse,
-  ].join("\n");
-}
-
-function buildCollabFinalPrompt(
-  partner: DirectAgent,
-  userText: string,
-  partnerResponse: string,
-  round: number,
-  totalRounds: number,
-): string {
-  return [
-    "Collaboration mode: produce the final user-facing answer using your partner's contribution below.",
-    "Adopt strong ideas, ignore weak ones, and keep the answer coherent.",
-    "",
-    `Final round: ${round}/${totalRounds}`,
-    `Partner: ${partner}`,
-    "Original user message:",
-    userText,
-    "",
-    "Partner contribution:",
-    partnerResponse,
+    "What do you think? Try your best to contribute something useful.",
   ].join("\n");
 }
 
@@ -932,12 +848,10 @@ function formatXcheckStep(step: DirectXcheckStep): string {
 
 function formatCollabStep(step: DirectCollabStep): string {
   switch (step) {
-    case "lead-draft":
-      return "lead draft";
-    case "partner-collab":
-      return "partner collab";
-    case "lead-final":
-      return "lead final";
+    case "lead-turn":
+      return "lead turn";
+    case "partner-turn":
+      return "partner turn";
   }
 }
 
@@ -962,7 +876,7 @@ function formatCollabRunStep(
   if (!round || !totalRounds) {
     return label;
   }
-  return `${label} (round ${round}/${totalRounds})`;
+  return `${label} (turn ${round}/${totalRounds})`;
 }
 
 function assertValidModeRounds(rounds: number): void {

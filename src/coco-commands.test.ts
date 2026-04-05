@@ -269,9 +269,10 @@ describe("coco direct commands", () => {
     });
 
     expect(handled).toBe(true);
-    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Collab mode enabled for 3 rounds."));
+    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Collab mode enabled for 3 turns."));
     expect(reply).toHaveBeenCalledWith(expect.stringContaining("Lead: codex"));
     expect(reply).toHaveBeenCalledWith(expect.stringContaining("Partner: claude"));
+    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Turns: 3"));
   });
 
   it("forwards slash commands to the active session without xcheck", async () => {

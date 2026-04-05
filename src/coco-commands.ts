@@ -160,7 +160,7 @@ async function handleCollabCommand(
         const state = runtime.deps.collabOn(message.chatKey, command.rounds);
         await message.reply(
           [
-            `Collab mode enabled for ${command.rounds} round${command.rounds === 1 ? "" : "s"}.`,
+            `Collab mode enabled for ${command.rounds} turn${command.rounds === 1 ? "" : "s"}.`,
             formatCollabState(state),
           ].join("\n\n"),
         );
@@ -334,7 +334,7 @@ export function buildCocoHelpText(): string {
     "/coco xcheck off - Disable xcheck mode",
     "/coco xcheck status - Show xcheck mode state",
     "/coco xcheck stop - Stop the current xcheck run after the current step",
-    "/coco collab on [rounds] - Enable collab mode; default is 1 round",
+    "/coco collab on [turns] - Enable collab mode; default is 1 turn",
     "/coco collab off - Disable collab mode",
     "/coco collab status - Show collab mode state",
     "/coco collab stop - Stop the current collab run after the current step",
@@ -342,7 +342,7 @@ export function buildCocoHelpText(): string {
     "",
     "After you bind and /coco use a target, any non-/coco message is forwarded to that session.",
     "When xcheck is on, normal messages run configurable draft/review rounds, then owner final.",
-    "When collab is on, normal messages run configurable lead/partner collaboration rounds, then lead final.",
+    "When collab is on, normal messages alternate between both bound sessions for a configurable number of turns.",
   ].join("\n");
 }
 
@@ -396,14 +396,14 @@ export function formatCurrentState(state: DirectChatState): string {
   }
 
   lines.push(`Collab: ${state.collab.enabled ? "on" : "off"}`);
-  lines.push(`Collab rounds: ${state.collab.rounds}`);
+  lines.push(`Collab turns: ${state.collab.rounds}`);
   lines.push(
     `Collab target: lead=${state.collab.lead ?? "none"} partner=${state.collab.partner ?? "none"}`,
   );
   if (state.collab.runState === "running") {
     const extra = state.collab.stopRequested ? " stop-requested" : "";
     lines.push(
-      `Collab run: [running] round=${state.collab.round ?? "unknown"}/${state.collab.rounds} step=${state.collab.step ?? "unknown"} started=${state.collab.startedAt ?? "unknown"}${extra}`,
+      `Collab run: [running] turn=${state.collab.round ?? "unknown"}/${state.collab.rounds} step=${state.collab.step ?? "unknown"} started=${state.collab.startedAt ?? "unknown"}${extra}`,
     );
   } else {
     lines.push("Collab run: [idle]");
@@ -443,12 +443,12 @@ export function formatXcheckState(state: DirectChatState): string {
 export function formatCollabState(state: DirectChatState): string {
   const lines = ["Collab state:"];
   lines.push(`Enabled: ${state.collab.enabled ? "on" : "off"}`);
-  lines.push(`Rounds: ${state.collab.rounds}`);
+  lines.push(`Turns: ${state.collab.rounds}`);
   lines.push(`Lead: ${state.collab.lead ?? "none"}`);
   lines.push(`Partner: ${state.collab.partner ?? "none"}`);
   lines.push(`Run: ${state.collab.runState}`);
   if (state.collab.round) {
-    lines.push(`Round: ${state.collab.round}/${state.collab.rounds}`);
+    lines.push(`Turn: ${state.collab.round}/${state.collab.rounds}`);
   }
   if (state.collab.step) {
     lines.push(`Step: ${state.collab.step}`);

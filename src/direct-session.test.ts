@@ -306,35 +306,30 @@ describe("direct session manager", () => {
     );
   });
 
-  it("supports multiple collab rounds before the final response", async () => {
+  it("alternates neutral collab turns and only forwards the original user message once", async () => {
     const codexSend = vi
       .fn<(prompt: string) => Promise<DirectSendResult>>()
       .mockResolvedValueOnce({
         agent: "codex",
         sessionId: "thread-1",
-        text: "draft round 1",
+        text: "codex turn 1",
       })
       .mockResolvedValueOnce({
         agent: "codex",
         sessionId: "thread-1",
-        text: "draft round 2",
-      })
-      .mockResolvedValueOnce({
-        agent: "codex",
-        sessionId: "thread-1",
-        text: "final from codex",
+        text: "codex turn 3",
       });
     const claudeSend = vi
       .fn<(prompt: string) => Promise<DirectSendResult>>()
       .mockResolvedValueOnce({
         agent: "claude",
         sessionId: "session-1",
-        text: "partner round 1",
+        text: "claude turn 2",
       })
       .mockResolvedValueOnce({
         agent: "claude",
         sessionId: "session-1",
-        text: "partner round 2",
+        text: "claude turn 4",
       });
 
     const manager = new DirectSessionManager(async (agent, sessionId) =>
@@ -348,18 +343,18 @@ describe("direct session manager", () => {
 
     await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
     await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
-    manager.collabOn("chat-1", 2);
+    manager.collabOn("chat-1", 4);
 
     const result = await manager.sendToActive("chat-1", "help me improve this");
 
     expect(result).toEqual([
       {
         type: "agent",
-        phase: "draft",
+        phase: "collab",
         result: {
           agent: "codex",
           sessionId: "thread-1",
-          text: "draft round 1",
+          text: "codex turn 1",
         },
       },
       {
@@ -368,16 +363,16 @@ describe("direct session manager", () => {
         result: {
           agent: "claude",
           sessionId: "session-1",
-          text: "partner round 1",
+          text: "claude turn 2",
         },
       },
       {
         type: "agent",
-        phase: "draft",
+        phase: "collab",
         result: {
           agent: "codex",
           sessionId: "thread-1",
-          text: "draft round 2",
+          text: "codex turn 3",
         },
       },
       {
@@ -386,36 +381,24 @@ describe("direct session manager", () => {
         result: {
           agent: "claude",
           sessionId: "session-1",
-          text: "partner round 2",
-        },
-      },
-      {
-        type: "agent",
-        phase: "final",
-        result: {
-          agent: "codex",
-          sessionId: "thread-1",
-          text: "final from codex",
+          text: "claude turn 4",
         },
       },
     ]);
-    expect(manager.current("chat-1").collab.rounds).toBe(2);
+    expect(manager.current("chat-1").collab.rounds).toBe(4);
     expect(claudeSend).toHaveBeenNthCalledWith(
       1,
-      expect.stringContaining("Current draft:\ndraft round 1"),
+      expect.stringContaining("### Original user message\nhelp me improve this"),
     );
     expect(claudeSend).toHaveBeenNthCalledWith(
       2,
-      expect.stringContaining("Round: 2/2"),
+      expect.stringContaining("### Previous message from codex\ncodex turn 3"),
     );
-    expect(codexSend).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining("Partner contribution:\npartner round 1"),
+    expect(claudeSend.mock.calls[0]?.[0]).toContain(
+      "What do you think? Try your best to contribute something useful.",
     );
-    expect(codexSend).toHaveBeenNthCalledWith(
-      3,
-      expect.stringContaining("Final round: 2/2"),
-    );
+    expect(codexSend).toHaveBeenNthCalledWith(2, expect.stringContaining("### Previous message from claude\nclaude turn 2"));
+    expect(codexSend.mock.calls[1]?.[0]).not.toContain("### Original user message");
   });
 
   it("emits xcheck outputs incrementally as each step completes", async () => {
@@ -689,22 +672,22 @@ describe("direct session manager", () => {
     resolveDraft({
       agent: "codex",
       sessionId: "thread-1",
-      text: "draft from codex",
+      text: "first collab turn from codex",
     });
 
     await expect(running).resolves.toEqual([
       {
         type: "agent",
-        phase: "draft",
+        phase: "collab",
         result: {
           agent: "codex",
           sessionId: "thread-1",
-          text: "draft from codex",
+          text: "first collab turn from codex",
         },
       },
       {
         type: "system",
-        text: "Collab stopped after lead draft (round 1/1).",
+        text: "Collab stopped after lead turn (turn 1/1).",
       },
     ]);
     expect(claudeSend).not.toHaveBeenCalled();
