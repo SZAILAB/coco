@@ -306,7 +306,7 @@ describe("direct session manager", () => {
     );
   });
 
-  it("alternates neutral collab turns and only forwards the original user message once", async () => {
+  it("alternates raw collab turns by relaying each reply unchanged", async () => {
     const codexSend = vi
       .fn<(prompt: string) => Promise<DirectSendResult>>()
       .mockResolvedValueOnce({
@@ -386,19 +386,10 @@ describe("direct session manager", () => {
       },
     ]);
     expect(manager.current("chat-1").collab.rounds).toBe(4);
-    expect(claudeSend).toHaveBeenNthCalledWith(
-      1,
-      expect.stringContaining("### Original user message\nhelp me improve this"),
-    );
-    expect(claudeSend).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining("### Previous message from codex\ncodex turn 3"),
-    );
-    expect(claudeSend.mock.calls[0]?.[0]).toContain(
-      "What do you think? Try your best to contribute something useful.",
-    );
-    expect(codexSend).toHaveBeenNthCalledWith(2, expect.stringContaining("### Previous message from claude\nclaude turn 2"));
-    expect(codexSend.mock.calls[1]?.[0]).not.toContain("### Original user message");
+    expect(codexSend).toHaveBeenNthCalledWith(1, "help me improve this");
+    expect(claudeSend).toHaveBeenNthCalledWith(1, "codex turn 1");
+    expect(codexSend).toHaveBeenNthCalledWith(2, "claude turn 2");
+    expect(claudeSend).toHaveBeenNthCalledWith(2, "codex turn 3");
   });
 
   it("emits xcheck outputs incrementally as each step completes", async () => {

@@ -493,25 +493,17 @@ export class DirectSessionManager {
     };
 
     try {
-      let previousSpeaker = pair.active;
       let previousText = "";
 
       for (let round = 1; round <= chat.collab.rounds; round += 1) {
         const isLeadTurn = round % 2 === 1;
-        const currentSpeaker = isLeadTurn ? pair.active : pair.other;
         const currentBinding = isLeadTurn ? pair.activeBinding : pair.otherBinding;
 
         chat.collab.run.step = isLeadTurn ? "lead-turn" : "partner-turn";
         chat.collab.run.round = round;
 
-        const prompt =
-          round === 1
-            ? userText
-            : round === 2
-              ? buildCollabFirstRelayPrompt(previousSpeaker, userText, previousText)
-              : buildCollabRelayPrompt(previousSpeaker, previousText);
+        const prompt = round === 1 ? userText : previousText;
         const response = await currentBinding.send(prompt);
-        previousSpeaker = currentSpeaker;
         previousText = response.text;
 
         await this.#pushOutput(
@@ -800,38 +792,6 @@ function buildXcheckFinalPrompt(
     "",
     "Reviewer feedback:",
     review,
-  ].join("\n");
-}
-
-function buildCollabFirstRelayPrompt(
-  previousSpeaker: DirectAgent,
-  userText: string,
-  previousMessage: string,
-): string {
-  return [
-    "Collaboration mode.",
-    "",
-    "### Original user message",
-    userText,
-    "",
-    `### Previous message from ${previousSpeaker}`,
-    previousMessage,
-    "",
-    "What do you think? Try your best to contribute something useful.",
-  ].join("\n");
-}
-
-function buildCollabRelayPrompt(
-  previousSpeaker: DirectAgent,
-  previousMessage: string,
-): string {
-  return [
-    "Collaboration mode.",
-    "",
-    `### Previous message from ${previousSpeaker}`,
-    previousMessage,
-    "",
-    "What do you think? Try your best to contribute something useful.",
   ].join("\n");
 }
 

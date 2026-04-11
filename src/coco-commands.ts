@@ -342,7 +342,7 @@ export function buildCocoHelpText(): string {
     "",
     "After you bind and /coco use a target, any non-/coco message is forwarded to that session.",
     "When xcheck is on, normal messages run configurable draft/review rounds, then owner final.",
-    "When collab is on, normal messages alternate between both bound sessions for a configurable number of turns.",
+    "When collab is on, normal messages relay raw replies between both bound sessions for a configurable number of turns.",
   ].join("\n");
 }
 

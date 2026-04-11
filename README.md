@@ -18,7 +18,7 @@
 - 在两者之间切换默认目标
 - 临时把某一条消息定向发给另一侧 agent
 - 让默认 agent 先起草，再让另一侧 agent review，最后回到默认 agent 出 final
-- 让默认 agent 和另一侧 agent 做有限 turn 数的往返协作
+- 让默认 agent 和另一侧 agent 做有限 turn 数的原样 relay 协作
 
 ## 当前边界
 
@@ -154,7 +154,7 @@ npm run telegram
 - 其他所有消息都会发给当前 active target
 - 这也包括 agent 自己的 slash command，比如 `/compact`
 - 如果 `xcheck` 已开启，普通消息会走 `owner draft <-> reviewer review` 的有限轮数流程，最后再由 owner 输出 final
-- 如果 `collab` 已开启，普通消息会在两个已绑定 session 之间按 turn 数交替 relay
+- 如果 `collab` 已开启，普通消息会在两个已绑定 session 之间按 turn 数交替 relay 原始回复
 - 但像 `/compact` 这样的 agent slash command 仍然会直接发给当前 active target，不走 `xcheck` / `collab`
 
 如果当前 chat 里还没有 active target：
@@ -335,10 +335,8 @@ npm run telegram
 
 1. 用户消息先发给 lead
 2. lead 先回复
-3. partner 第一次接棒时，会收到：
-   - original user message
-   - lead 的上一条消息
-4. 从下一 turn 开始，双方只收到上一位 agent 的上一条消息，再继续往返
+3. 从第二 turn 开始，下一位 agent 只会收到上一位 agent 的原始上一条回复
+4. bot 不会额外包任何 `collab` 提示词、角色说明或总结
 5. 跑满配置的 turns 后停止，不做额外 final synthesis
 
 这一轮结束后，下一条普通消息才会再次触发新一轮。
