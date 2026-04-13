@@ -306,7 +306,7 @@ describe("direct session manager", () => {
     );
   });
 
-  it("alternates raw collab turns by relaying each reply unchanged", async () => {
+  it("wraps lead replies before relaying them to the partner in collab mode", async () => {
     const codexSend = vi
       .fn<(prompt: string) => Promise<DirectSendResult>>()
       .mockResolvedValueOnce({
@@ -387,9 +387,9 @@ describe("direct session manager", () => {
     ]);
     expect(manager.current("chat-1").collab.rounds).toBe(4);
     expect(codexSend).toHaveBeenNthCalledWith(1, "help me improve this");
-    expect(claudeSend).toHaveBeenNthCalledWith(1, "codex turn 1");
+    expect(claudeSend).toHaveBeenNthCalledWith(1, "executor message:\n################\ncodex turn 1\n################");
     expect(codexSend).toHaveBeenNthCalledWith(2, "claude turn 2");
-    expect(claudeSend).toHaveBeenNthCalledWith(2, "codex turn 3");
+    expect(claudeSend).toHaveBeenNthCalledWith(2, "executor message:\n################\ncodex turn 3\n################");
   });
 
   it("emits xcheck outputs incrementally as each step completes", async () => {

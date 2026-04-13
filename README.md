@@ -154,7 +154,7 @@ npm run telegram
 - 其他所有消息都会发给当前 active target
 - 这也包括 agent 自己的 slash command，比如 `/compact`
 - 如果 `xcheck` 已开启，普通消息会走 `owner draft <-> reviewer review` 的有限轮数流程，最后再由 owner 输出 final
-- 如果 `collab` 已开启，普通消息会在两个已绑定 session 之间按 turn 数交替 relay 原始回复
+- 如果 `collab` 已开启，普通消息会在两个已绑定 session 之间按 turn 数交替 relay；其中 lead 发给 partner 的内容会包上 `executor message` 边界
 - 但像 `/compact` 这样的 agent slash command 仍然会直接发给当前 active target，不走 `xcheck` / `collab`
 
 如果当前 chat 里还没有 active target：
@@ -335,8 +335,8 @@ npm run telegram
 
 1. 用户消息先发给 lead
 2. lead 先回复
-3. 从第二 turn 开始，下一位 agent 只会收到上一位 agent 的原始上一条回复
-4. bot 不会额外包任何 `collab` 提示词、角色说明或总结
+3. 从第二 turn 开始，lead 收到 partner 的原始上一条回复；partner 收到 lead 的上一条回复时会被包成 `executor message`
+4. bot 不会额外包任何 `collab` 总结；只有 lead -> partner 的 relay 会增加这个边界包装
 5. 跑满配置的 turns 后停止，不做额外 final synthesis
 
 这一轮结束后，下一条普通消息才会再次触发新一轮。

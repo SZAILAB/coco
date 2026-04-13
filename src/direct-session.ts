@@ -502,7 +502,12 @@ export class DirectSessionManager {
         chat.collab.run.step = isLeadTurn ? "lead-turn" : "partner-turn";
         chat.collab.run.round = round;
 
-        const prompt = round === 1 ? userText : previousText;
+        const prompt =
+          round === 1
+            ? userText
+            : isLeadTurn
+              ? previousText
+              : buildCollabPartnerPrompt(previousText);
         const response = await currentBinding.send(prompt);
         previousText = response.text;
 
@@ -793,6 +798,10 @@ function buildXcheckFinalPrompt(
     "Reviewer feedback:",
     review,
   ].join("\n");
+}
+
+function buildCollabPartnerPrompt(text: string): string {
+  return ["executor message:", "################", text, "################"].join("\n");
 }
 
 function formatXcheckStep(step: DirectXcheckStep): string {
