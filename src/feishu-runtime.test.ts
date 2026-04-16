@@ -1,9 +1,11 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { describe, expect, it } from "vitest";
 import {
+  buildFeishuChatKey,
   createFeishuProxyAgent,
   extractInboundMessage,
   parseFeishuMessageText,
+  readFeishuEnvs,
   readFeishuProxy,
   resolveFeishuDomain,
 } from "./feishu-runtime.js";
@@ -101,5 +103,60 @@ describe("feishu runtime", () => {
   it("creates a websocket proxy agent when proxy is configured", () => {
     expect(createFeishuProxyAgent(null)).toBeNull();
     expect(createFeishuProxyAgent("http://127.0.0.1:7890")).toBeTruthy();
+  });
+
+  it("reads the legacy single-bot feishu env", () => {
+    expect(
+      readFeishuEnvs({
+        COCO_FEISHU_APP_ID: "app-id-1",
+        COCO_FEISHU_APP_SECRET: "app-secret-1",
+      }),
+    ).toEqual([
+      {
+        botKey: "default",
+        appId: "app-id-1",
+        appSecret: "app-secret-1",
+        domain: "feishu",
+        proxy: null,
+        allowedUserIds: [],
+        allowedChatIds: [],
+      },
+    ]);
+  });
+
+  it("reads multiple numbered feishu bots from env", () => {
+    expect(
+      readFeishuEnvs({
+        COCO_FEISHU_APP_ID_2: "app-id-2",
+        COCO_FEISHU_APP_SECRET_2: "app-secret-2",
+        COCO_FEISHU_APP_ID_1: "app-id-1",
+        COCO_FEISHU_APP_SECRET_1: "app-secret-1",
+        COCO_FEISHU_USERS: "ou_1,ou_2",
+      }),
+    ).toEqual([
+      {
+        botKey: "1",
+        appId: "app-id-1",
+        appSecret: "app-secret-1",
+        domain: "feishu",
+        proxy: null,
+        allowedUserIds: ["ou_1", "ou_2"],
+        allowedChatIds: [],
+      },
+      {
+        botKey: "2",
+        appId: "app-id-2",
+        appSecret: "app-secret-2",
+        domain: "feishu",
+        proxy: null,
+        allowedUserIds: ["ou_1", "ou_2"],
+        allowedChatIds: [],
+      },
+    ]);
+  });
+
+  it("builds feishu chat keys that include the bot identity", () => {
+    expect(buildFeishuChatKey("1", "oc_123")).toBe("feishu:1:oc_123");
+    expect(buildFeishuChatKey("2", "oc_123")).toBe("feishu:2:oc_123");
   });
 });

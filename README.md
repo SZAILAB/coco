@@ -102,6 +102,24 @@ COCO_FEISHU_APP_ID=你的_app_id
 COCO_FEISHU_APP_SECRET=你的_app_secret
 ```
 
+如果你想一次启动多个飞书 bot，可以在 `.env.local` 里写多组带编号的配置：
+
+```dotenv
+COCO_FEISHU_APP_ID_1=你的_app_id_1
+COCO_FEISHU_APP_SECRET_1=你的_app_secret_1
+
+COCO_FEISHU_APP_ID_2=你的_app_id_2
+COCO_FEISHU_APP_SECRET_2=你的_app_secret_2
+```
+
+说明：
+
+- 仍然使用同一个命令：`npm run feishu`
+- 如果检测到带编号的多组配置，运行时会一次启动全部 bot
+- 每个 bot 的聊天状态都会独立隔离，不会串 `codex` / `claude` session
+- `COCO_FEISHU_DOMAIN`、`COCO_FEISHU_PROXY`、`COCO_FEISHU_USERS`、`COCO_FEISHU_CHATS` 这类可选配置会对全部 bot 一起生效
+- 如果同时写了单 bot 配置和多 bot 编号配置，运行时会优先使用带编号的多 bot 配置
+
 可选环境变量：
 
 - `COCO_FEISHU_DOMAIN`

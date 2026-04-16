@@ -11,6 +11,7 @@ const MAX_TEXT_CHARS = 4000;
 const RECENT_MESSAGE_TTL_MS = 10 * 60_000;
 
 export type FeishuEnv = {
+  botKey: string;
   appId: string;
   appSecret: string;
   domain: string;
@@ -42,6 +43,32 @@ type FeishuEventEnvelope = {
 };
 
 export async function startFeishuBot(env = readFeishuEnv()): Promise<void> {
+  await startFeishuBots([env]);
+}
+
+export async function startFeishuBots(envs = readFeishuEnvs()): Promise<void> {
+  const wsClients: Lark.WSClient[] = [];
+
+  try {
+    for (const env of envs) {
+      wsClients.push(await startSingleFeishuBot(env));
+    }
+  } catch (err) {
+    for (const wsClient of wsClients) {
+      try {
+        wsClient.close({ force: true });
+      } catch {
+        // Ignore cleanup errors while aborting startup.
+      }
+    }
+    throw err;
+  }
+
+  installShutdownHandlers(wsClients);
+  await new Promise<void>(() => {});
+}
+
+async function startSingleFeishuBot(env: FeishuEnv): Promise<Lark.WSClient> {
   const domain = resolveFeishuDomain(env.domain);
   const client = new Lark.Client({
     appId: env.appId,
@@ -90,7 +117,7 @@ export async function startFeishuBot(env = readFeishuEnv()): Promise<void> {
         text: inbound.text,
         reply: async (text: string) => sendFeishuText(client, inbound.chatId, text),
       };
-      const chatKey = buildFeishuChatKey(inbound.chatId);
+      const chatKey = buildFeishuChatKey(env.botKey, inbound.chatId);
       if (!isAllowedFeishuMessage(env, inbound)) {
         await message.reply("Not authorized.");
         return;
@@ -108,30 +135,39 @@ export async function startFeishuBot(env = readFeishuEnv()): Promise<void> {
     },
   });
 
-  installShutdownHandlers(wsClient);
-
-  console.log("[feishu] Starting bot...");
+  console.log(`${formatFeishuLogPrefix(env)} Starting bot...`);
   await wsClient.start({ eventDispatcher });
-  console.log("[feishu] Bot is running");
-  await new Promise<void>(() => {});
+  console.log(`${formatFeishuLogPrefix(env)} Bot is running`);
+  return wsClient;
 }
 
 export function readFeishuEnv(): FeishuEnv {
-  const appId = process.env.COCO_FEISHU_APP_ID?.trim() ?? "";
-  const appSecret = process.env.COCO_FEISHU_APP_SECRET?.trim() ?? "";
+  const [env] = readFeishuEnvs();
+  return env;
+}
+
+export function readFeishuEnvs(env: NodeJS.ProcessEnv = process.env): FeishuEnv[] {
+  const shared = readSharedFeishuEnv(env);
+  const numberedBots = readNumberedFeishuBots(env);
+  if (numberedBots.length > 0) {
+    return numberedBots.map((bot) => ({ ...shared, ...bot }));
+  }
+
+  const appId = env.COCO_FEISHU_APP_ID?.trim() ?? "";
+  const appSecret = env.COCO_FEISHU_APP_SECRET?.trim() ?? "";
 
   if (!appId || !appSecret) {
     throw new Error("COCO_FEISHU_APP_ID and COCO_FEISHU_APP_SECRET are required");
   }
 
-  return {
-    appId,
-    appSecret,
-    domain: process.env.COCO_FEISHU_DOMAIN?.trim() || "feishu",
-    proxy: readFeishuProxy(process.env),
-    allowedUserIds: parseCsv(process.env.COCO_FEISHU_USERS),
-    allowedChatIds: parseCsv(process.env.COCO_FEISHU_CHATS),
-  };
+  return [
+    {
+      ...shared,
+      botKey: "default",
+      appId,
+      appSecret,
+    },
+  ];
 }
 
 export function resolveFeishuDomain(domain: string): string | Lark.Domain {
@@ -222,17 +258,19 @@ async function sendFeishuText(
   }
 }
 
-function installShutdownHandlers(wsClient: Lark.WSClient): void {
+function installShutdownHandlers(wsClients: Lark.WSClient[]): void {
   let shuttingDown = false;
 
   const shutdown = (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[feishu] Shutting down (${signal})...`);
-    try {
-      wsClient.close({ force: true });
-    } catch {
-      // Ignore close errors during shutdown.
+    for (const wsClient of wsClients) {
+      try {
+        wsClient.close({ force: true });
+      } catch {
+        // Ignore close errors during shutdown.
+      }
     }
     process.exit(0);
   };
@@ -328,8 +366,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function buildFeishuChatKey(chatId: string): string {
-  return `feishu:${chatId}`;
+export function buildFeishuChatKey(botKey: string, chatId: string): string {
+  return `feishu:${botKey}:${chatId}`;
 }
 
 function isAllowedFeishuMessage(env: FeishuEnv, message: FeishuInboundMessage): boolean {
@@ -338,4 +376,49 @@ function isAllowedFeishuMessage(env: FeishuEnv, message: FeishuInboundMessage): 
   const chatAllowed =
     env.allowedChatIds.length === 0 || env.allowedChatIds.includes(message.chatId);
   return userAllowed && chatAllowed;
+}
+
+function readSharedFeishuEnv(env: NodeJS.ProcessEnv): Omit<FeishuEnv, "botKey" | "appId" | "appSecret"> {
+  return {
+    domain: env.COCO_FEISHU_DOMAIN?.trim() || "feishu",
+    proxy: readFeishuProxy(env),
+    allowedUserIds: parseCsv(env.COCO_FEISHU_USERS),
+    allowedChatIds: parseCsv(env.COCO_FEISHU_CHATS),
+  };
+}
+
+function readNumberedFeishuBots(
+  env: NodeJS.ProcessEnv,
+): Array<Pick<FeishuEnv, "botKey" | "appId" | "appSecret">> {
+  const suffixes = new Set<string>();
+
+  for (const key of Object.keys(env)) {
+    const match = key.match(/^COCO_FEISHU_APP_(?:ID|SECRET)_(\d+)$/);
+    if (match?.[1]) {
+      suffixes.add(match[1]);
+    }
+  }
+
+  return [...suffixes]
+    .sort((left, right) => Number.parseInt(left, 10) - Number.parseInt(right, 10))
+    .map((suffix) => {
+      const appId = env[`COCO_FEISHU_APP_ID_${suffix}`]?.trim() ?? "";
+      const appSecret = env[`COCO_FEISHU_APP_SECRET_${suffix}`]?.trim() ?? "";
+
+      if (!appId || !appSecret) {
+        throw new Error(
+          `COCO_FEISHU_APP_ID_${suffix} and COCO_FEISHU_APP_SECRET_${suffix} are required together`,
+        );
+      }
+
+      return {
+        botKey: suffix,
+        appId,
+        appSecret,
+      };
+    });
+}
+
+function formatFeishuLogPrefix(env: FeishuEnv): string {
+  return env.botKey === "default" ? "[feishu]" : `[feishu:${env.botKey}]`;
 }
