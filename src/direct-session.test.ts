@@ -392,6 +392,198 @@ describe("direct session manager", () => {
     expect(claudeSend).toHaveBeenNthCalledWith(2, "executor message:\n################\ncodex turn 3\n################");
   });
 
+  it("stops collab early after four consecutive short replies", async () => {
+    const codexSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "收到",
+      })
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "继续",
+      })
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "不该再发",
+      });
+    const claudeSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockResolvedValueOnce({
+        agent: "claude",
+        sessionId: "session-1",
+        text: "ok",
+      })
+      .mockResolvedValueOnce({
+        agent: "claude",
+        sessionId: "session-1",
+        text: "好",
+      })
+      .mockResolvedValueOnce({
+        agent: "claude",
+        sessionId: "session-1",
+        text: "不该再发",
+      });
+
+    const manager = new DirectSessionManager(async (agent, sessionId) =>
+      createFakeBinding(
+        agent,
+        sessionId,
+        "/tmp/project",
+        agent === "codex" ? codexSend : claudeSend,
+      ),
+    );
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    manager.collabOn("chat-1", 6);
+
+    const result = await manager.sendToActive("chat-1", "help me improve this");
+
+    expect(result).toEqual([
+      {
+        type: "agent",
+        phase: "collab",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "收到",
+        },
+      },
+      {
+        type: "agent",
+        phase: "collab",
+        result: {
+          agent: "claude",
+          sessionId: "session-1",
+          text: "ok",
+        },
+      },
+      {
+        type: "agent",
+        phase: "collab",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "继续",
+        },
+      },
+      {
+        type: "agent",
+        phase: "collab",
+        result: {
+          agent: "claude",
+          sessionId: "session-1",
+          text: "好",
+        },
+      },
+      {
+        type: "system",
+        text: "Collab stopped early after 4 consecutive short replies.",
+      },
+    ]);
+    expect(codexSend).toHaveBeenCalledTimes(2);
+    expect(claudeSend).toHaveBeenCalledTimes(2);
+  });
+
+  it("resets the early-stop counter after a longer collab reply", async () => {
+    const codexSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "收到",
+      })
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "这是一个明显超过三十个字符的较长回复，用来重置短回复计数，并且保证不会被当成短回复。",
+      })
+      .mockResolvedValueOnce({
+        agent: "codex",
+        sessionId: "thread-1",
+        text: "继续",
+      });
+    const claudeSend = vi
+      .fn<(prompt: string) => Promise<DirectSendResult>>()
+      .mockResolvedValueOnce({
+        agent: "claude",
+        sessionId: "session-1",
+        text: "ok",
+      })
+      .mockResolvedValueOnce({
+        agent: "claude",
+        sessionId: "session-1",
+        text: "好",
+      });
+
+    const manager = new DirectSessionManager(async (agent, sessionId) =>
+      createFakeBinding(
+        agent,
+        sessionId,
+        "/tmp/project",
+        agent === "codex" ? codexSend : claudeSend,
+      ),
+    );
+
+    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    manager.collabOn("chat-1", 5);
+
+    const result = await manager.sendToActive("chat-1", "help me improve this");
+
+    expect(result).toEqual([
+      {
+        type: "agent",
+        phase: "collab",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "收到",
+        },
+      },
+      {
+        type: "agent",
+        phase: "collab",
+        result: {
+          agent: "claude",
+          sessionId: "session-1",
+          text: "ok",
+        },
+      },
+      {
+        type: "agent",
+        phase: "collab",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "这是一个明显超过三十个字符的较长回复，用来重置短回复计数，并且保证不会被当成短回复。",
+        },
+      },
+      {
+        type: "agent",
+        phase: "collab",
+        result: {
+          agent: "claude",
+          sessionId: "session-1",
+          text: "好",
+        },
+      },
+      {
+        type: "agent",
+        phase: "collab",
+        result: {
+          agent: "codex",
+          sessionId: "thread-1",
+          text: "继续",
+        },
+      },
+    ]);
+  });
+
   it("emits xcheck outputs incrementally as each step completes", async () => {
     let releaseReview: ((value: DirectSendResult) => void) | null = null;
     const seenPhases: string[] = [];

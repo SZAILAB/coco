@@ -494,6 +494,7 @@ export class DirectSessionManager {
 
     try {
       let previousText = "";
+      let consecutiveShortReplies = 0;
 
       for (let round = 1; round <= chat.collab.rounds; round += 1) {
         const isLeadTurn = round % 2 === 1;
@@ -529,6 +530,21 @@ export class DirectSessionManager {
             formatCollabRunStep,
           )
         ) {
+          return outputs;
+        }
+
+        consecutiveShortReplies = isShortCollabReply(response.text)
+          ? consecutiveShortReplies + 1
+          : 0;
+        if (consecutiveShortReplies >= 4 && round < chat.collab.rounds) {
+          await this.#pushOutput(
+            outputs,
+            {
+              type: "system",
+              text: "Collab stopped early after 4 consecutive short replies.",
+            },
+            options,
+          );
           return outputs;
         }
       }
@@ -852,4 +868,8 @@ function assertValidModeRounds(rounds: number): void {
   if (!Number.isInteger(rounds) || rounds < 1) {
     throw new Error("Rounds must be a positive integer");
   }
+}
+
+function isShortCollabReply(text: string): boolean {
+  return Array.from(text.replace(/\s+/g, "")).length < 30;
 }

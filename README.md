@@ -338,6 +338,7 @@ npm run telegram
 3. 从第二 turn 开始，lead 收到 partner 的原始上一条回复；partner 收到 lead 的上一条回复时会被包成 `executor message`
 4. bot 不会额外包任何 `collab` 总结；只有 lead -> partner 的 relay 会增加这个边界包装
 5. 跑满配置的 turns 后停止，不做额外 final synthesis
+6. 如果连续 4 次回复在去掉空白后都少于 30 个字符，会提前停止当前这一轮 `collab`
 
 这一轮结束后，下一条普通消息才会再次触发新一轮。
 
