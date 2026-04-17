@@ -171,14 +171,16 @@ npm run telegram
 - 所有 `/coco ...` 会被 bot 拦截
 - 其他所有消息都会发给当前 active target
 - 这也包括 agent 自己的 slash command，比如 `/compact`
-- 如果 `xcheck` 已开启，普通消息会走 `owner draft <-> reviewer review` 的有限轮数流程，最后再由 owner 输出 final
+- 如果 `xcheck` 已开启，普通消息会走 `lead draft <-> partner review` 的有限轮数流程，最后再由 lead 输出 final
 - 如果 `collab` 已开启，普通消息会在两个已绑定 session 之间按 turn 数交替 relay；其中 lead 发给 partner 的内容会包上 `executor message` 边界
 - 但像 `/compact` 这样的 agent slash command 仍然会直接发给当前 active target，不走 `xcheck` / `collab`
 
 如果当前 chat 里还没有 active target：
 
 - 普通消息不会被处理
-- bot 会提示你先执行 `/coco bind ...`
+- bot 会根据当前绑定状态提示你：
+- 如果要直接聊天，先执行 `/coco bind lead ...`
+- 如果要 `xcheck` / `collab`，同时绑定 `lead` 和 `partner`
 
 ### 1. `/coco help`
 
@@ -188,40 +190,40 @@ npm run telegram
 /coco help
 ```
 
-### 2. `/coco bind codex <thread_id> <cwd>`
+### 2. `/coco bind lead <codex|claude> <session_id> <cwd>`
 
-绑定一个已有的 Codex 会话：
-
-```text
-/coco bind codex abc123 /path/to/project
-```
-
-### 3. `/coco bind claude <session_id> <cwd>`
-
-绑定一个已有的 Claude 会话：
+绑定 `lead` 角色到一个已有的 Codex 或 Claude 会话：
 
 ```text
-/coco bind claude 3f101bd8-767e-49fa-94e5-39a2eecbe08c /path/to/project
+/coco bind lead codex abc123 /path/to/project
 ```
 
-### 4. `/coco use <codex|claude>`
+### 3. `/coco bind partner <codex|claude> <session_id> <cwd>`
+
+绑定 `partner` 角色到一个已有的 Codex 或 Claude 会话：
+
+```text
+/coco bind partner claude 3f101bd8-767e-49fa-94e5-39a2eecbe08c /path/to/project
+```
+
+### 4. `/coco use <lead|partner>`
 
 切换当前默认目标：
 
 ```text
-/coco use codex
-/coco use claude
+/coco use lead
+/coco use partner
 ```
 
 设置之后，任何**非 `/coco`** 消息都会自动发给当前目标。
 
-### 5. `/coco ask <codex|claude> <text>`
+### 5. `/coco ask <lead|partner> <text>`
 
 单次定向发消息，但**不切换默认目标**：
 
 ```text
-/coco ask claude 帮我 review 一下刚才 codex 的回复
-/coco ask codex 请你回应一下刚才 claude 的意见
+/coco ask partner 帮我 review 一下刚才 lead 的回复
+/coco ask lead 请你回应一下刚才 partner 的意见
 ```
 
 ### 6. `/coco current`
@@ -408,7 +410,7 @@ npm run telegram
 ### 场景 1：只继续一个 Claude 会话
 
 ```text
-/coco bind claude <session_id> <cwd>
+/coco bind lead claude <session_id> <cwd>
 /coco current
 继续刚才的话题，用一句话告诉我我们现在在做什么
 ```
@@ -416,7 +418,7 @@ npm run telegram
 ### 场景 2：只继续一个 Codex 会话
 
 ```text
-/coco bind codex <thread_id> <cwd>
+/coco bind lead codex <thread_id> <cwd>
 /coco current
 继续刚才那个实现
 ```
@@ -424,13 +426,13 @@ npm run telegram
 ### 场景 3：同一个聊天同时绑定 Codex 和 Claude
 
 ```text
-/coco bind codex <thread_id> <cwd>
-/coco bind claude <session_id> <cwd>
+/coco bind lead codex <thread_id> <cwd>
+/coco bind partner claude <session_id> <cwd>
 /coco current
-/coco use codex
+/coco use lead
 继续做刚才那个修改
-/coco ask claude 帮我 review 一下刚才 codex 的思路
-/coco use claude
+/coco ask partner 帮我 review 一下刚才 lead 的思路
+/coco use partner
 你再展开讲一下刚才的 review
 ```
 
@@ -439,9 +441,9 @@ npm run telegram
 ### 场景 4：多轮 xcheck
 
 ```text
-/coco bind codex <thread_id> <cwd>
-/coco bind claude <session_id> <cwd>
-/coco use codex
+/coco bind lead codex <thread_id> <cwd>
+/coco bind partner claude <session_id> <cwd>
+/coco use lead
 /coco xcheck on 10
 帮我把这个改动方案写完整
 ```
@@ -449,19 +451,19 @@ npm run telegram
 这时 bot 会按 turns 交替输出，例如：
 
 ```text
-[codex draft <thread_id>]
+[lead codex draft <thread_id>]
 ...
 
-[claude review <session_id>]
+[partner claude review <session_id>]
 ...
 
-[codex draft <thread_id>]
+[lead codex draft <thread_id>]
 ...
 
-[claude review <session_id>]
+[partner claude review <session_id>]
 ...
 
-[codex final <thread_id>]
+[lead codex final <thread_id>]
 ...
 ```
 
@@ -474,9 +476,9 @@ xcheck already running, please wait
 ### 场景 5：多轮 collab
 
 ```text
-/coco bind codex <thread_id> <cwd>
-/coco bind claude <session_id> <cwd>
-/coco use codex
+/coco bind lead codex <thread_id> <cwd>
+/coco bind partner claude <session_id> <cwd>
+/coco use lead
 /coco collab on 3
 帮我把这个方案补强一下，互相接着聊几轮
 ```
@@ -484,13 +486,13 @@ xcheck already running, please wait
 这时 bot 会按轮数来回输出，例如：
 
 ```text
-[codex collab <thread_id>]
+[lead codex collab <thread_id>]
 ...
 
-[claude collab <session_id>]
+[partner claude collab <session_id>]
 ...
 
-[codex collab <thread_id>]
+[lead codex collab <thread_id>]
 ...
 ```
 
@@ -505,40 +507,40 @@ collab already running, please wait
 bot 回复时会带来源前缀，例如：
 
 ```text
-[claude 3f101bd8-767e-49fa-94e5-39a2eecbe08c]
+[lead claude 3f101bd8-767e-49fa-94e5-39a2eecbe08c]
 ...
 ```
 
 或者：
 
 ```text
-[codex abc123]
+[partner codex abc123]
 ...
 ```
 
 `xcheck` 模式下则会看到带 phase 的前缀：
 
 ```text
-[codex draft abc123]
+[lead codex draft abc123]
 ...
 
-[claude review 3f101bd8-767e-49fa-94e5-39a2eecbe08c]
+[partner claude review 3f101bd8-767e-49fa-94e5-39a2eecbe08c]
 ...
 
-[codex final abc123]
+[lead codex final abc123]
 ...
 ```
 
 `collab` 模式下则会看到：
 
 ```text
-[codex collab abc123]
+[lead codex collab abc123]
 ...
 
-[claude collab 3f101bd8-767e-49fa-94e5-39a2eecbe08c]
+[partner claude collab 3f101bd8-767e-49fa-94e5-39a2eecbe08c]
 ...
 
-[codex collab abc123]
+[lead codex collab abc123]
 ...
 ```
 

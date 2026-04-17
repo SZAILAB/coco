@@ -36,7 +36,7 @@ describe("telegram command handlers", () => {
 
     await handlers.help(ctx);
 
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("No active direct session target"));
-    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("/coco bind codex <thread_id> <cwd>"));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("No direct sessions are bound"));
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("/coco bind lead <codex|claude> <session_id> <cwd>"));
   });
 });

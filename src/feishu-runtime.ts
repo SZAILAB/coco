@@ -90,12 +90,12 @@ async function startSingleFeishuBot(env: FeishuEnv): Promise<Lark.WSClient> {
   const wsClient = new Lark.WSClient(wsClientParams);
   const cocoHandlers = createCocoCommandHandlers({
     deps: {
-      bind: (chatKey, agent, sessionId, cwd) => directSessions.bind(chatKey, agent, sessionId, cwd),
-      use: (chatKey, agent) => directSessions.use(chatKey, agent),
-      ask: (chatKey, agent, text) => directSessions.ask(chatKey, agent, text),
+      bind: (chatKey, role, agent, sessionId, cwd) => directSessions.bind(chatKey, role, agent, sessionId, cwd),
+      use: (chatKey, role) => directSessions.use(chatKey, role),
+      ask: (chatKey, role, text) => directSessions.ask(chatKey, role, text),
       sendToActive: (chatKey, text, options) => directSessions.sendToActive(chatKey, text, options),
       current: (chatKey) => directSessions.current(chatKey),
-      detach: (chatKey, agent) => directSessions.detach(chatKey, agent),
+      detach: (chatKey, role) => directSessions.detach(chatKey, role),
       xcheckOn: (chatKey, rounds) => directSessions.xcheckOn(chatKey, rounds),
       xcheckOff: (chatKey) => directSessions.xcheckOff(chatKey),
       xcheckStop: (chatKey) => directSessions.xcheckStop(chatKey),
@@ -131,7 +131,8 @@ async function startSingleFeishuBot(env: FeishuEnv): Promise<Lark.WSClient> {
       }
 
       const text = inbound.text.trim();
-      await message.reply(text.startsWith("/") ? buildDirectSessionEntryText() : buildNoActiveTargetText());
+      const state = directSessions.current(chatKey);
+      await message.reply(text.startsWith("/") ? buildDirectSessionEntryText(state) : buildNoActiveTargetText(state));
     },
   });
 

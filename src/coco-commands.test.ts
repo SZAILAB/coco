@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
-import { createCocoCommandHandlers, parseCocoCommand } from "./coco-commands.js";
+import {
+  buildNoActiveTargetText,
+  createCocoCommandHandlers,
+  parseCocoCommand,
+} from "./coco-commands.js";
 import type { DirectChatState } from "./direct-session.js";
 
 function makeState(overrides?: Partial<DirectChatState>): DirectChatState {
   return {
-    activeTarget: "codex",
+    activeTarget: "lead",
     bindings: {
-      codex: {
+      lead: {
+        role: "lead",
         agent: "codex",
         sessionId: "thread-1",
         cwd: "/tmp/project",
@@ -17,8 +22,8 @@ function makeState(overrides?: Partial<DirectChatState>): DirectChatState {
     xcheck: {
       enabled: false,
       rounds: 1,
-      owner: "codex",
-      reviewer: null,
+      lead: "codex",
+      partner: null,
       runState: "idle",
       step: null,
       round: null,
@@ -43,22 +48,24 @@ function makeState(overrides?: Partial<DirectChatState>): DirectChatState {
 }
 
 describe("coco direct commands", () => {
-  it("parses bind, ask, xcheck, and collab commands", () => {
-    expect(parseCocoCommand("/coco bind codex thread-1 /tmp/project")).toEqual({
+  it("parses role-based bind, ask, xcheck, and collab commands", () => {
+    expect(parseCocoCommand("/coco bind lead codex thread-1 /tmp/project")).toEqual({
       name: "bind",
+      role: "lead",
       agent: "codex",
       sessionId: "thread-1",
       cwd: "/tmp/project",
     });
-    expect(parseCocoCommand("/coco bind claude session-1 /tmp/project with spaces")).toEqual({
+    expect(parseCocoCommand("/coco bind partner claude session-1 /tmp/project with spaces")).toEqual({
       name: "bind",
+      role: "partner",
       agent: "claude",
       sessionId: "session-1",
       cwd: "/tmp/project with spaces",
     });
-    expect(parseCocoCommand("/coco ask claude review this")).toEqual({
+    expect(parseCocoCommand("/coco ask partner review this")).toEqual({
       name: "ask",
-      agent: "claude",
+      role: "partner",
       text: "review this",
     });
     expect(parseCocoCommand("/coco xcheck status")).toEqual({
@@ -79,6 +86,11 @@ describe("coco direct commands", () => {
       action: "on",
       rounds: 3,
     });
+  });
+
+  it("guides users to bind lead first and partner for pair modes", () => {
+    expect(buildNoActiveTargetText()).toContain("bind lead first");
+    expect(buildNoActiveTargetText()).toContain("xcheck / collab");
   });
 
   it("binds a session and reports current state", async () => {
@@ -102,13 +114,13 @@ describe("coco direct commands", () => {
 
     const handled = await handlers.handleCocoCommand({
       chatKey: "telegram:1001",
-      text: "/coco bind codex thread-1 /tmp/project",
+      text: "/coco bind lead codex thread-1 /tmp/project",
       reply,
     });
 
     expect(handled).toBe(true);
     expect(reply).toHaveBeenCalledWith(
-      expect.stringContaining("Bound codex session thread-1 in /tmp/project."),
+      expect.stringContaining("Bound lead to codex session thread-1 in /tmp/project."),
     );
   });
 
@@ -123,8 +135,9 @@ describe("coco direct commands", () => {
         current: vi.fn(() =>
           makeState({
             bindings: {
-              codex: makeState().bindings.codex,
-              claude: {
+              lead: makeState().bindings.lead,
+              partner: {
+                role: "partner",
                 agent: "claude",
                 sessionId: "session-1",
                 cwd: "/tmp/project",
@@ -135,8 +148,8 @@ describe("coco direct commands", () => {
             xcheck: {
               enabled: true,
               rounds: 10,
-              owner: "codex",
-              reviewer: "claude",
+              lead: "codex",
+              partner: "claude",
               runState: "idle",
               step: null,
               round: null,
@@ -150,8 +163,9 @@ describe("coco direct commands", () => {
         xcheckOn: vi.fn((_chatKey, rounds) =>
           makeState({
             bindings: {
-              codex: makeState().bindings.codex,
-              claude: {
+              lead: makeState().bindings.lead,
+              partner: {
+                role: "partner",
                 agent: "claude",
                 sessionId: "session-1",
                 cwd: "/tmp/project",
@@ -162,8 +176,8 @@ describe("coco direct commands", () => {
             xcheck: {
               enabled: true,
               rounds: rounds ?? 1,
-              owner: "codex",
-              reviewer: "claude",
+              lead: "codex",
+              partner: "claude",
               runState: "idle",
               step: null,
               round: null,
@@ -189,7 +203,7 @@ describe("coco direct commands", () => {
 
     expect(handled).toBe(true);
     expect(reply).toHaveBeenCalledWith(expect.stringContaining("Xcheck mode enabled for 10 rounds."));
-    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Reviewer: claude"));
+    expect(reply).toHaveBeenCalledWith(expect.stringContaining("Partner: claude"));
     expect(reply).toHaveBeenCalledWith(expect.stringContaining("Rounds: 10"));
   });
 
@@ -204,8 +218,9 @@ describe("coco direct commands", () => {
         current: vi.fn(() =>
           makeState({
             bindings: {
-              codex: makeState().bindings.codex,
-              claude: {
+              lead: makeState().bindings.lead,
+              partner: {
+                role: "partner",
                 agent: "claude",
                 sessionId: "session-1",
                 cwd: "/tmp/project",
@@ -234,8 +249,9 @@ describe("coco direct commands", () => {
         collabOn: vi.fn((_chatKey, rounds) =>
           makeState({
             bindings: {
-              codex: makeState().bindings.codex,
-              claude: {
+              lead: makeState().bindings.lead,
+              partner: {
+                role: "partner",
                 agent: "claude",
                 sessionId: "session-1",
                 cwd: "/tmp/project",
@@ -280,6 +296,7 @@ describe("coco direct commands", () => {
     const sendToActive = vi.fn(async () => [
       {
         type: "agent" as const,
+        role: "partner" as const,
         phase: "default" as const,
         result: {
           agent: "claude" as const,
@@ -312,7 +329,7 @@ describe("coco direct commands", () => {
     });
 
     expect(handled).toBe(true);
-    expect(reply).toHaveBeenCalledWith("[claude sess-1]\nlooks good");
+    expect(reply).toHaveBeenCalledWith("[partner claude sess-1]\nlooks good");
     expect(sendToActive).toHaveBeenCalledWith(
       "feishu:oc_1",
       "/compact",
@@ -328,6 +345,7 @@ describe("coco direct commands", () => {
     const outputs = [
       {
         type: "agent" as const,
+        role: "lead" as const,
         phase: "draft" as const,
         result: {
           agent: "codex" as const,
@@ -337,6 +355,7 @@ describe("coco direct commands", () => {
       },
       {
         type: "agent" as const,
+        role: "partner" as const,
         phase: "review" as const,
         result: {
           agent: "claude" as const,
@@ -346,6 +365,7 @@ describe("coco direct commands", () => {
       },
       {
         type: "agent" as const,
+        role: "lead" as const,
         phase: "final" as const,
         result: {
           agent: "codex" as const,
@@ -384,9 +404,9 @@ describe("coco direct commands", () => {
 
     expect(handled).toBe(true);
     expect(reply.mock.calls).toEqual([
-      ["[codex draft thread-1]\ndraft answer"],
-      ["[claude review session-1]\nreview notes"],
-      ["[codex final thread-1]\nfinal answer"],
+      ["[lead codex draft thread-1]\ndraft answer"],
+      ["[partner claude review session-1]\nreview notes"],
+      ["[lead codex final thread-1]\nfinal answer"],
     ]);
   });
 });

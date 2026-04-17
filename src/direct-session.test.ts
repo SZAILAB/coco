@@ -39,29 +39,54 @@ function createFakeBinding(
 }
 
 describe("direct session manager", () => {
+  it("binds lead and partner roles, even when both use the same agent type", async () => {
+    const manager = new DirectSessionManager(async (agent, sessionId) => createFakeBinding(agent, sessionId));
+
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "codex", "thread-2", "/tmp/project");
+    const state = manager.use("chat-1", "partner");
+
+    expect(state.activeTarget).toBe("partner");
+    expect(state.bindings.lead?.agent).toBe("codex");
+    expect(state.bindings.lead?.sessionId).toBe("thread-1");
+    expect(state.bindings.partner?.agent).toBe("codex");
+    expect(state.bindings.partner?.sessionId).toBe("thread-2");
+  });
+
+  it("rejects binding lead and partner to the same underlying session", async () => {
+    const manager = new DirectSessionManager(async (agent, sessionId) => createFakeBinding(agent, sessionId));
+
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+
+    await expect(manager.bind("chat-1", "partner", "codex", "thread-1", "/tmp/project")).rejects.toThrow(
+      "Cannot bind partner to the same codex session thread-1 already used by lead; bind a separate session instead",
+    );
+  });
+
   it("binds two agents and switches the active target", async () => {
     const manager = new DirectSessionManager(async (agent, sessionId) => createFakeBinding(agent, sessionId));
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
-    const state = manager.use("chat-1", "claude");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
+    const state = manager.use("chat-1", "partner");
 
-    expect(state.activeTarget).toBe("claude");
-    expect(state.bindings.codex?.sessionId).toBe("thread-1");
-    expect(state.bindings.codex?.cwd).toBe("/tmp/project");
-    expect(state.bindings.claude?.sessionId).toBe("session-1");
-    expect(state.bindings.claude?.cwd).toBe("/tmp/project");
+    expect(state.activeTarget).toBe("partner");
+    expect(state.bindings.lead?.sessionId).toBe("thread-1");
+    expect(state.bindings.lead?.cwd).toBe("/tmp/project");
+    expect(state.bindings.partner?.sessionId).toBe("session-1");
+    expect(state.bindings.partner?.cwd).toBe("/tmp/project");
   });
 
   it("sends plain text to the active binding", async () => {
     const manager = new DirectSessionManager(async (agent, sessionId) => createFakeBinding(agent, sessionId));
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
     const result = await manager.sendToActive("chat-1", "hello");
 
     expect(result).toEqual([
       {
         type: "agent",
+        role: "lead",
         phase: "default",
         result: {
           agent: "codex",
@@ -85,41 +110,41 @@ describe("direct session manager", () => {
       close: agent === "codex" ? closeCodex : closeClaude,
     }));
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
-    manager.use("chat-1", "claude");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
+    manager.use("chat-1", "partner");
 
     const state = await manager.detach("chat-1");
 
     expect(closeClaude).toHaveBeenCalledOnce();
     expect(closeCodex).not.toHaveBeenCalled();
-    expect(state.activeTarget).toBe("codex");
-    expect(state.bindings.claude).toBeUndefined();
-    expect(state.bindings.codex?.sessionId).toBe("thread-1");
-    expect(state.bindings.codex?.cwd).toBe("/tmp/project");
+    expect(state.activeTarget).toBe("lead");
+    expect(state.bindings.partner).toBeUndefined();
+    expect(state.bindings.lead?.sessionId).toBe("thread-1");
+    expect(state.bindings.lead?.cwd).toBe("/tmp/project");
   });
 
   it("requires both agents before enabling xcheck", async () => {
     const manager = new DirectSessionManager(async (agent, sessionId) => createFakeBinding(agent, sessionId));
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
 
     expect(() => manager.xcheckOn("chat-1")).toThrow(
-      "Xcheck requires both codex and claude to be bound and an active target selected",
+      "Xcheck requires both lead and partner sessions to be bound",
     );
   });
 
   it("requires both agents before enabling collab", async () => {
     const manager = new DirectSessionManager(async (agent, sessionId) => createFakeBinding(agent, sessionId));
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
 
     expect(() => manager.collabOn("chat-1")).toThrow(
-      "Collab requires both codex and claude to be bound and an active target selected",
+      "Collab requires both lead and partner sessions to be bound",
     );
   });
 
-  it("runs the fixed owner draft reviewer review owner final pipeline", async () => {
+  it("runs the fixed lead draft partner review lead final pipeline", async () => {
     const codexSend = vi
       .fn<(prompt: string) => Promise<DirectSendResult>>()
       .mockResolvedValueOnce({
@@ -147,8 +172,8 @@ describe("direct session manager", () => {
       ),
     );
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
     manager.xcheckOn("chat-1");
 
     const result = await manager.sendToActive("chat-1", "please fix this");
@@ -156,6 +181,7 @@ describe("direct session manager", () => {
     expect(result).toEqual([
       {
         type: "agent",
+        role: "lead",
         phase: "draft",
         result: {
           agent: "codex",
@@ -165,6 +191,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "partner",
         phase: "review",
         result: {
           agent: "claude",
@@ -174,6 +201,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "lead",
         phase: "final",
         result: {
           agent: "codex",
@@ -183,10 +211,10 @@ describe("direct session manager", () => {
       },
     ]);
     expect(claudeSend).toHaveBeenCalledWith(expect.stringContaining("Original user message:\nplease fix this"));
-    expect(claudeSend).toHaveBeenCalledWith(expect.stringContaining("Draft to review:\ndraft from codex"));
+    expect(claudeSend).toHaveBeenCalledWith(expect.stringContaining("Lead draft to review:\ndraft from codex"));
     expect(codexSend).toHaveBeenNthCalledWith(
       2,
-      expect.stringContaining("Reviewer feedback:\nreview from claude"),
+      expect.stringContaining("Partner feedback:\nreview from claude"),
     );
   });
 
@@ -230,8 +258,8 @@ describe("direct session manager", () => {
       ),
     );
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
     manager.xcheckOn("chat-1", 2);
 
     const result = await manager.sendToActive("chat-1", "please fix this");
@@ -239,6 +267,7 @@ describe("direct session manager", () => {
     expect(result).toEqual([
       {
         type: "agent",
+        role: "lead",
         phase: "draft",
         result: {
           agent: "codex",
@@ -248,6 +277,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "partner",
         phase: "review",
         result: {
           agent: "claude",
@@ -257,6 +287,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "lead",
         phase: "draft",
         result: {
           agent: "codex",
@@ -266,6 +297,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "partner",
         phase: "review",
         result: {
           agent: "claude",
@@ -275,6 +307,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "lead",
         phase: "final",
         result: {
           agent: "codex",
@@ -341,8 +374,8 @@ describe("direct session manager", () => {
       ),
     );
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
     manager.collabOn("chat-1", 4);
 
     const result = await manager.sendToActive("chat-1", "help me improve this");
@@ -350,6 +383,7 @@ describe("direct session manager", () => {
     expect(result).toEqual([
       {
         type: "agent",
+        role: "lead",
         phase: "collab",
         result: {
           agent: "codex",
@@ -359,6 +393,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "partner",
         phase: "collab",
         result: {
           agent: "claude",
@@ -368,6 +403,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "lead",
         phase: "collab",
         result: {
           agent: "codex",
@@ -377,6 +413,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "partner",
         phase: "collab",
         result: {
           agent: "claude",
@@ -437,8 +474,8 @@ describe("direct session manager", () => {
       ),
     );
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
     manager.collabOn("chat-1", 6);
 
     const result = await manager.sendToActive("chat-1", "help me improve this");
@@ -446,6 +483,7 @@ describe("direct session manager", () => {
     expect(result).toEqual([
       {
         type: "agent",
+        role: "lead",
         phase: "collab",
         result: {
           agent: "codex",
@@ -455,6 +493,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "partner",
         phase: "collab",
         result: {
           agent: "claude",
@@ -464,6 +503,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "lead",
         phase: "collab",
         result: {
           agent: "codex",
@@ -473,6 +513,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "partner",
         phase: "collab",
         result: {
           agent: "claude",
@@ -529,8 +570,8 @@ describe("direct session manager", () => {
       ),
     );
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
     manager.collabOn("chat-1", 5);
 
     const result = await manager.sendToActive("chat-1", "help me improve this");
@@ -538,6 +579,7 @@ describe("direct session manager", () => {
     expect(result).toEqual([
       {
         type: "agent",
+        role: "lead",
         phase: "collab",
         result: {
           agent: "codex",
@@ -547,6 +589,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "partner",
         phase: "collab",
         result: {
           agent: "claude",
@@ -556,6 +599,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "lead",
         phase: "collab",
         result: {
           agent: "codex",
@@ -565,6 +609,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "partner",
         phase: "collab",
         result: {
           agent: "claude",
@@ -574,6 +619,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "lead",
         phase: "collab",
         result: {
           agent: "codex",
@@ -616,8 +662,8 @@ describe("direct session manager", () => {
       ),
     );
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
     manager.xcheckOn("chat-1");
 
     const running = manager.sendToActive("chat-1", "please fix this", {
@@ -644,6 +690,7 @@ describe("direct session manager", () => {
     await expect(running).resolves.toEqual([
       {
         type: "agent",
+        role: "lead",
         phase: "draft",
         result: {
           agent: "codex",
@@ -653,6 +700,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "partner",
         phase: "review",
         result: {
           agent: "claude",
@@ -662,6 +710,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "lead",
         phase: "final",
         result: {
           agent: "codex",
@@ -702,8 +751,8 @@ describe("direct session manager", () => {
       ),
     );
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
     manager.xcheckOn("chat-1");
 
     const running = manager.sendToActive("chat-1", "first request");
@@ -723,6 +772,7 @@ describe("direct session manager", () => {
     await expect(running).resolves.toEqual([
       {
         type: "agent",
+        role: "lead",
         phase: "draft",
         result: {
           agent: "codex",
@@ -732,6 +782,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "partner",
         phase: "review",
         result: {
           agent: "claude",
@@ -741,6 +792,7 @@ describe("direct session manager", () => {
       },
       {
         type: "agent",
+        role: "lead",
         phase: "final",
         result: {
           agent: "codex",
@@ -775,8 +827,8 @@ describe("direct session manager", () => {
       ),
     );
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
     manager.xcheckOn("chat-1");
 
     const running = manager.sendToActive("chat-1", "first request");
@@ -798,6 +850,7 @@ describe("direct session manager", () => {
     await expect(running).resolves.toEqual([
       {
         type: "agent",
+        role: "lead",
         phase: "draft",
         result: {
           agent: "codex",
@@ -807,7 +860,7 @@ describe("direct session manager", () => {
       },
       {
         type: "system",
-        text: "Xcheck stopped after owner draft (round 1/1).",
+        text: "Xcheck stopped after lead draft (round 1/1).",
       },
     ]);
     expect(claudeSend).not.toHaveBeenCalled();
@@ -838,8 +891,8 @@ describe("direct session manager", () => {
       ),
     );
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
     manager.collabOn("chat-1");
 
     const running = manager.sendToActive("chat-1", "first request");
@@ -861,6 +914,7 @@ describe("direct session manager", () => {
     await expect(running).resolves.toEqual([
       {
         type: "agent",
+        role: "lead",
         phase: "collab",
         result: {
           agent: "codex",
@@ -880,8 +934,8 @@ describe("direct session manager", () => {
   it("keeps xcheck and collab mutually exclusive", async () => {
     const manager = new DirectSessionManager(async (agent, sessionId) => createFakeBinding(agent, sessionId));
 
-    await manager.bind("chat-1", "codex", "thread-1", "/tmp/project");
-    await manager.bind("chat-1", "claude", "session-1", "/tmp/project");
+    await manager.bind("chat-1", "lead", "codex", "thread-1", "/tmp/project");
+    await manager.bind("chat-1", "partner", "claude", "session-1", "/tmp/project");
 
     const collabState = manager.collabOn("chat-1", 3);
     expect(collabState.collab.enabled).toBe(true);

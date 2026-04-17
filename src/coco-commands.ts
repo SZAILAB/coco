@@ -1,17 +1,28 @@
 import type { DirectAgent, DirectSendResult } from "./direct-backend.js";
-import type { DirectChatState, DirectDispatchOptions, DirectDispatchOutput } from "./direct-session.js";
+import type {
+  DirectChatState,
+  DirectDispatchOptions,
+  DirectDispatchOutput,
+  DirectRole,
+} from "./direct-session.js";
 
 export type CocoCommandDeps = {
-  bind(chatKey: string, agent: DirectAgent, sessionId: string, cwd: string): Promise<DirectChatState>;
-  use(chatKey: string, agent: DirectAgent): DirectChatState;
-  ask(chatKey: string, agent: DirectAgent, text: string): Promise<DirectSendResult>;
+  bind(
+    chatKey: string,
+    role: DirectRole,
+    agent: DirectAgent,
+    sessionId: string,
+    cwd: string,
+  ): Promise<DirectChatState>;
+  use(chatKey: string, role: DirectRole): DirectChatState;
+  ask(chatKey: string, role: DirectRole, text: string): Promise<DirectSendResult>;
   sendToActive(
     chatKey: string,
     text: string,
     options?: DirectDispatchOptions,
   ): Promise<DirectDispatchOutput[] | null>;
   current(chatKey: string): DirectChatState;
-  detach(chatKey: string, agent?: DirectAgent): Promise<DirectChatState>;
+  detach(chatKey: string, role?: DirectRole): Promise<DirectChatState>;
   xcheckOn(chatKey: string, rounds?: number): DirectChatState;
   xcheckOff(chatKey: string): DirectChatState;
   xcheckStop(chatKey: string): DirectChatState;
@@ -33,14 +44,16 @@ export type CocoCommandMessage = {
 type ParsedCocoCommand =
   | { name: "help" }
   | { name: "current" }
-  | { name: "bind"; agent: DirectAgent; sessionId: string; cwd: string }
-  | { name: "use"; agent: DirectAgent }
-  | { name: "ask"; agent: DirectAgent; text: string }
-  | { name: "detach"; agent?: DirectAgent }
+  | { name: "bind"; role: DirectRole; agent: DirectAgent; sessionId: string; cwd: string }
+  | { name: "use"; role: DirectRole }
+  | { name: "ask"; role: DirectRole; text: string }
+  | { name: "detach"; role?: DirectRole }
   | { name: "xcheck"; action: "on"; rounds: number }
   | { name: "xcheck"; action: "off" | "status" | "stop" }
   | { name: "collab"; action: "on"; rounds: number }
   | { name: "collab"; action: "off" | "status" | "stop" };
+
+const DIRECT_ROLES: DirectRole[] = ["lead", "partner"];
 
 export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
   return {
@@ -61,28 +74,29 @@ export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
           try {
             const state = await runtime.deps.bind(
               message.chatKey,
+              parsed.role,
               parsed.agent,
               parsed.sessionId,
               parsed.cwd,
             );
             await message.reply(
               [
-                `Bound ${parsed.agent} session ${parsed.sessionId} in ${parsed.cwd}.`,
+                `Bound ${parsed.role} to ${parsed.agent} session ${parsed.sessionId} in ${parsed.cwd}.`,
                 formatCurrentState(state),
               ].join("\n\n"),
             );
           } catch (err) {
-            await message.reply(`Failed to bind ${parsed.agent}: ${err}`);
+            await message.reply(`Failed to bind ${parsed.role}: ${err}`);
           }
           return true;
         }
 
         case "use":
           try {
-            const state = runtime.deps.use(message.chatKey, parsed.agent);
+            const state = runtime.deps.use(message.chatKey, parsed.role);
             await message.reply(
               [
-                `Active target set to ${parsed.agent}.`,
+                `Active target set to ${parsed.role}.`,
                 formatCurrentState(state),
               ].join("\n\n"),
             );
@@ -93,17 +107,17 @@ export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
 
         case "ask":
           try {
-            const result = await runtime.deps.ask(message.chatKey, parsed.agent, parsed.text);
-            await message.reply(formatAgentReply(result));
+            const result = await runtime.deps.ask(message.chatKey, parsed.role, parsed.text);
+            await message.reply(formatAgentReply(parsed.role, result));
           } catch (err) {
-            await message.reply(`Failed to send to ${parsed.agent}: ${err}`);
+            await message.reply(`Failed to send to ${parsed.role}: ${err}`);
           }
           return true;
 
         case "detach":
           try {
-            const state = await runtime.deps.detach(message.chatKey, parsed.agent);
-            const suffix = parsed.agent ? ` ${parsed.agent}` : "";
+            const state = await runtime.deps.detach(message.chatKey, parsed.role);
+            const suffix = parsed.role ? ` ${parsed.role}` : "";
             await message.reply([`Detached${suffix}.`, formatCurrentState(state)].join("\n\n"));
           } catch (err) {
             await message.reply(`Failed to detach: ${err}`);
@@ -261,26 +275,26 @@ export function parseCocoCommand(text: string): ParsedCocoCommand | null {
     case "current":
       return { name: "current" };
     case "bind": {
-      const match = rest.match(/^(\S+)\s+(\S+)\s+(.+)$/);
+      const match = rest.match(/^(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/);
       if (!match) return { name: "help" };
-      const [, agent, sessionId, cwd] = match;
-      if (!isDirectAgent(agent) || !cwd.trim()) return { name: "help" };
-      return { name: "bind", agent, sessionId, cwd: cwd.trim() };
+      const [, role, agent, sessionId, cwd] = match;
+      if (!isDirectRole(role) || !isDirectAgent(agent) || !cwd.trim()) return { name: "help" };
+      return { name: "bind", role, agent, sessionId, cwd: cwd.trim() };
     }
     case "use": {
-      if (!isDirectAgent(rest)) return { name: "help" };
-      return { name: "use", agent: rest };
+      if (!isDirectRole(rest)) return { name: "help" };
+      return { name: "use", role: rest };
     }
     case "ask": {
-      const [agent, ...textParts] = rest.split(/\s+/);
+      const [role, ...textParts] = rest.split(/\s+/);
       const prompt = textParts.join(" ").trim();
-      if (!isDirectAgent(agent) || !prompt) return { name: "help" };
-      return { name: "ask", agent, text: prompt };
+      if (!isDirectRole(role) || !prompt) return { name: "help" };
+      return { name: "ask", role, text: prompt };
     }
     case "detach": {
       if (!rest) return { name: "detach" };
-      if (!isDirectAgent(rest)) return { name: "help" };
-      return { name: "detach", agent: rest };
+      if (!isDirectRole(rest)) return { name: "help" };
+      return { name: "detach", role: rest };
     }
     case "xcheck": {
       if (rest === "on") {
@@ -324,12 +338,12 @@ export function parseCocoCommand(text: string): ParsedCocoCommand | null {
 export function buildCocoHelpText(): string {
   return [
     "coco session commands:",
-    "/coco bind codex <thread_id> <cwd> - Bind a Codex session in a specific workdir",
-    "/coco bind claude <session_id> <cwd> - Bind a Claude session in a specific workdir",
-    "/coco use <codex|claude> - Set the default direct-chat target",
-    "/coco ask <codex|claude> <text> - Send one message without switching target",
+    "/coco bind lead <codex|claude> <session_id> <cwd> - Bind the lead role to a Codex or Claude session",
+    "/coco bind partner <codex|claude> <session_id> <cwd> - Bind the partner role to a Codex or Claude session",
+    "/coco use <lead|partner> - Set the default direct-chat target",
+    "/coco ask <lead|partner> <text> - Send one message without switching target",
     "/coco current - Show current bindings and active target",
-    "/coco detach [codex|claude] - Detach the active or named binding",
+    "/coco detach [lead|partner] - Detach the active or named binding",
     "/coco xcheck on [rounds] - Enable xcheck mode; default is 1 round",
     "/coco xcheck off - Disable xcheck mode",
     "/coco xcheck status - Show xcheck mode state",
@@ -340,34 +354,63 @@ export function buildCocoHelpText(): string {
     "/coco collab stop - Stop the current collab run after the current step",
     "/coco help - This message",
     "",
-    "After you bind and /coco use a target, any non-/coco message is forwarded to that session.",
-    "When xcheck is on, normal messages run configurable draft/review rounds, then owner final.",
-    "When collab is on, normal messages relay raw replies between both bound sessions for a configurable number of turns.",
+    "For direct chat, bind lead first and /coco use lead.",
+    "For xcheck / collab, bind both lead and partner.",
   ].join("\n");
 }
 
-export function buildNoActiveTargetText(): string {
+export function buildNoActiveTargetText(state?: DirectChatState): string {
+  const lead = state?.bindings.lead;
+  const partner = state?.bindings.partner;
+
+  if (!lead && !partner) {
+    return [
+      "No direct sessions are bound for this chat.",
+      "To start chatting, bind lead first with /coco bind lead <codex|claude> <session_id> <cwd>.",
+      "For xcheck / collab, bind both lead and partner.",
+    ].join("\n");
+  }
+
+  if (lead && !partner) {
+    return [
+      `Lead is bound to ${lead.agent} and ready for direct chat.`,
+      "To use xcheck / collab, bind partner with /coco bind partner <codex|claude> <session_id> <cwd>.",
+    ].join("\n");
+  }
+
+  if (!lead && partner) {
+    return [
+      `Only partner is bound to ${partner.agent}.`,
+      "For the standard workflow, bind lead first with /coco bind lead <codex|claude> <session_id> <cwd>.",
+      "For xcheck / collab, bind both lead and partner.",
+    ].join("\n");
+  }
+
   return [
-    "No active direct session target is bound for this chat.",
-    "Use /coco help to see commands, then bind a session with /coco bind ...",
+    "Lead and partner are both bound, but no active direct-chat target is selected.",
+    "Use /coco use lead or /coco use partner for direct chat.",
+    "xcheck / collab can already run with both bindings.",
   ].join("\n");
 }
 
-export function buildDirectSessionEntryText(): string {
-  return [buildNoActiveTargetText(), "", buildCocoHelpText()].join("\n\n");
+export function buildDirectSessionEntryText(state?: DirectChatState): string {
+  return [buildNoActiveTargetText(state), "", buildCocoHelpText()].join("\n\n");
 }
 
 export function formatCurrentState(state: DirectChatState): string {
   const lines = ["Direct session state:"];
   lines.push(`Active: ${state.activeTarget ?? "none"}`);
 
-  const agents: DirectAgent[] = ["codex", "claude"];
   let hasBindings = false;
-  for (const agent of agents) {
-    const binding = state.bindings[agent];
+  for (const role of DIRECT_ROLES) {
+    const binding = state.bindings[role];
     if (!binding) continue;
     hasBindings = true;
-    const parts = [`- ${agent}: ${binding.sessionId}`, `cwd=${binding.cwd}`, `[${binding.status}]`];
+    const parts = [
+      `- ${role}: ${binding.agent} ${binding.sessionId}`,
+      `cwd=${binding.cwd}`,
+      `[${binding.status}]`,
+    ];
     if (binding.error) {
       parts.push(`error=${binding.error}`);
     }
@@ -381,7 +424,7 @@ export function formatCurrentState(state: DirectChatState): string {
   lines.push(`Xcheck: ${state.xcheck.enabled ? "on" : "off"}`);
   lines.push(`Xcheck rounds: ${state.xcheck.rounds}`);
   lines.push(
-    `Xcheck target: owner=${state.xcheck.owner ?? "none"} reviewer=${state.xcheck.reviewer ?? "none"}`,
+    `Xcheck target: lead=${state.xcheck.lead ?? "none"} partner=${state.xcheck.partner ?? "none"}`,
   );
   if (state.xcheck.runState === "running") {
     const extra = state.xcheck.stopRequested ? " stop-requested" : "";
@@ -419,8 +462,8 @@ export function formatXcheckState(state: DirectChatState): string {
   const lines = ["Xcheck state:"];
   lines.push(`Enabled: ${state.xcheck.enabled ? "on" : "off"}`);
   lines.push(`Rounds: ${state.xcheck.rounds}`);
-  lines.push(`Owner: ${state.xcheck.owner ?? "none"}`);
-  lines.push(`Reviewer: ${state.xcheck.reviewer ?? "none"}`);
+  lines.push(`Lead: ${state.xcheck.lead ?? "none"}`);
+  lines.push(`Partner: ${state.xcheck.partner ?? "none"}`);
   lines.push(`Run: ${state.xcheck.runState}`);
   if (state.xcheck.round) {
     lines.push(`Round: ${state.xcheck.round}/${state.xcheck.rounds}`);
@@ -470,22 +513,26 @@ export function formatDispatchOutput(output: DirectDispatchOutput): string {
     return output.text;
   }
   if (output.phase === "default") {
-    return formatAgentReply(output.result);
+    return formatAgentReply(output.role, output.result);
   }
 
-  const header = `[${output.result.agent} ${output.phase} ${output.result.sessionId}]`;
+  const header = `[${output.role} ${output.result.agent} ${output.phase} ${output.result.sessionId}]`;
   const body = output.result.text.trim() || "(empty reply)";
   return `${header}\n${body}`;
 }
 
-export function formatAgentReply(result: DirectSendResult): string {
-  const header = `[${result.agent} ${result.sessionId}]`;
+export function formatAgentReply(role: DirectRole, result: DirectSendResult): string {
+  const header = `[${role} ${result.agent} ${result.sessionId}]`;
   const body = result.text.trim() || "(empty reply)";
   return `${header}\n${body}`;
 }
 
 function isDirectAgent(value: string | undefined): value is DirectAgent {
   return value === "codex" || value === "claude";
+}
+
+function isDirectRole(value: string | undefined): value is DirectRole {
+  return value === "lead" || value === "partner";
 }
 
 function shouldBypassSessionMode(text: string): boolean {

@@ -6,9 +6,12 @@ import {
   type DirectSendResult,
 } from "./direct-backend.js";
 
+export type DirectRole = "lead" | "partner";
+
 export type DirectDispatchOutput =
   | {
       type: "agent";
+      role: DirectRole;
       phase: "default" | "draft" | "review" | "collab" | "final";
       result: DirectSendResult;
     }
@@ -22,7 +25,7 @@ export type DirectDispatchOptions = {
   onOutput?(output: DirectDispatchOutput): Promise<void> | void;
 };
 
-export type DirectXcheckStep = "owner-draft" | "reviewer-review" | "owner-final";
+export type DirectXcheckStep = "lead-draft" | "partner-review" | "lead-final";
 export type DirectCollabStep = "lead-turn" | "partner-turn";
 
 type DirectModeRun<Step extends string> = {
@@ -44,17 +47,16 @@ type DirectModeSnapshot<Step extends string> = {
   lastError: string | null;
 };
 
-export type DirectXcheckSnapshot = DirectModeSnapshot<DirectXcheckStep> & {
-  owner: DirectAgent | null;
-  reviewer: DirectAgent | null;
-};
-
-export type DirectCollabSnapshot = DirectModeSnapshot<DirectCollabStep> & {
+type DirectRolePairSnapshot = {
   lead: DirectAgent | null;
   partner: DirectAgent | null;
 };
 
+export type DirectXcheckSnapshot = DirectModeSnapshot<DirectXcheckStep> & DirectRolePairSnapshot;
+export type DirectCollabSnapshot = DirectModeSnapshot<DirectCollabStep> & DirectRolePairSnapshot;
+
 export type DirectBindingSnapshot = {
+  role: DirectRole;
   agent: DirectAgent;
   sessionId: string;
   cwd: string;
@@ -63,21 +65,19 @@ export type DirectBindingSnapshot = {
 };
 
 export type DirectChatState = {
-  activeTarget: DirectAgent | null;
-  bindings: Partial<Record<DirectAgent, DirectBindingSnapshot>>;
+  activeTarget: DirectRole | null;
+  bindings: Partial<Record<DirectRole, DirectBindingSnapshot>>;
   xcheck: DirectXcheckSnapshot;
   collab: DirectCollabSnapshot;
 };
 
 type DirectChatRuntime = {
-  activeTarget: DirectAgent | null;
-  bindings: Partial<Record<DirectAgent, DirectBinding>>;
+  activeTarget: DirectRole | null;
+  bindings: Partial<Record<DirectRole, DirectBinding>>;
   xcheck: {
     enabled: boolean;
     rounds: number;
-    run:
-      | DirectModeRun<DirectXcheckStep>
-      | null;
+    run: DirectModeRun<DirectXcheckStep> | null;
     lastError: string | null;
   };
   collab: {
@@ -89,11 +89,11 @@ type DirectChatRuntime = {
 };
 
 type DirectPair = {
-  active: DirectAgent;
-  other: DirectAgent;
-  activeBinding: DirectBinding;
-  otherBinding: DirectBinding;
+  leadBinding: DirectBinding;
+  partnerBinding: DirectBinding;
 };
+
+const DIRECT_ROLES: DirectRole[] = ["lead", "partner"];
 
 export class DirectSessionManager {
   readonly #chats = new Map<string, DirectChatRuntime>();
@@ -103,39 +103,46 @@ export class DirectSessionManager {
     this.#bindingFactory = bindingFactory;
   }
 
-  async bind(chatKey: string, agent: DirectAgent, sessionId: string, cwd: string): Promise<DirectChatState> {
+  async bind(
+    chatKey: string,
+    role: DirectRole,
+    agent: DirectAgent,
+    sessionId: string,
+    cwd: string,
+  ): Promise<DirectChatState> {
     const chat = this.#getOrCreateChat(chatKey);
     this.#assertNoModeRun(chat, "bind a session");
+    this.#assertUniqueRoleSession(chat, role, agent, sessionId);
 
-    const existing = chat.bindings[agent];
+    const existing = chat.bindings[role];
     if (existing) {
       await existing.close();
     }
 
     const binding = await this.#bindingFactory(agent, sessionId, cwd);
-    chat.bindings[agent] = binding;
+    chat.bindings[role] = binding;
     if (!chat.activeTarget) {
-      chat.activeTarget = agent;
+      chat.activeTarget = role;
     }
     return this.current(chatKey);
   }
 
-  use(chatKey: string, agent: DirectAgent): DirectChatState {
+  use(chatKey: string, role: DirectRole): DirectChatState {
     const chat = this.#chats.get(chatKey);
-    if (!chat?.bindings[agent]) {
-      throw new Error(`No ${agent} session is bound for this chat`);
+    if (!chat?.bindings[role]) {
+      throw new Error(`No ${role} session is bound for this chat`);
     }
 
     this.#assertNoModeRun(chat, "switch the active target");
-    chat.activeTarget = agent;
+    chat.activeTarget = role;
     return this.current(chatKey);
   }
 
-  async ask(chatKey: string, agent: DirectAgent, text: string): Promise<DirectSendResult> {
+  async ask(chatKey: string, role: DirectRole, text: string): Promise<DirectSendResult> {
     const chat = this.#chats.get(chatKey);
-    const binding = chat?.bindings[agent];
+    const binding = chat?.bindings[role];
     if (!binding) {
-      throw new Error(`No ${agent} session is bound for this chat`);
+      throw new Error(`No ${role} session is bound for this chat`);
     }
 
     this.#assertNoModeRun(chat, "send a directed message");
@@ -148,7 +155,7 @@ export class DirectSessionManager {
     options?: DirectDispatchOptions,
   ): Promise<DirectDispatchOutput[] | null> {
     const chat = this.#chats.get(chatKey);
-    if (!chat?.activeTarget) return null;
+    if (!chat) return null;
 
     const activeMode = this.#activeModeRun(chat);
     if (activeMode) {
@@ -158,11 +165,12 @@ export class DirectSessionManager {
       );
     }
 
-    const binding = chat.bindings[chat.activeTarget];
-    if (!binding) return null;
-
     if (options?.bypassSessionMode || (!chat.xcheck.enabled && !chat.collab.enabled)) {
-      return await this.#sendDirect(binding, text, options);
+      const role = chat.activeTarget;
+      if (!role) return null;
+      const binding = chat.bindings[role];
+      if (!binding) return null;
+      return await this.#sendDirect(role, binding, text, options);
     }
 
     if (chat.collab.enabled) {
@@ -247,12 +255,13 @@ export class DirectSessionManager {
       return this.#emptyState();
     }
 
-    const bindings: Partial<Record<DirectAgent, DirectBindingSnapshot>> = {};
-    for (const agent of ["codex", "claude"] as const) {
-      const binding = chat.bindings[agent];
+    const bindings: Partial<Record<DirectRole, DirectBindingSnapshot>> = {};
+    for (const role of DIRECT_ROLES) {
+      const binding = chat.bindings[role];
       if (!binding) continue;
-      bindings[agent] = {
-        agent,
+      bindings[role] = {
+        role,
+        agent: binding.agent,
         sessionId: binding.sessionId(),
         cwd: binding.cwd(),
         status: binding.status(),
@@ -268,7 +277,7 @@ export class DirectSessionManager {
     };
   }
 
-  async detach(chatKey: string, agent?: DirectAgent): Promise<DirectChatState> {
+  async detach(chatKey: string, role?: DirectRole): Promise<DirectChatState> {
     const chat = this.#chats.get(chatKey);
     if (!chat) {
       return this.#emptyState();
@@ -276,11 +285,11 @@ export class DirectSessionManager {
 
     this.#assertNoModeRun(chat, "detach a session");
 
-    const targets = agent
-      ? [agent]
+    const targets = role
+      ? [role]
       : chat.activeTarget
         ? [chat.activeTarget]
-        : (["codex", "claude"] as DirectAgent[]);
+        : DIRECT_ROLES;
 
     for (const target of targets) {
       const binding = chat.bindings[target];
@@ -290,19 +299,19 @@ export class DirectSessionManager {
     }
 
     if (chat.activeTarget && !chat.bindings[chat.activeTarget]) {
-      chat.activeTarget = chat.bindings.codex
-        ? "codex"
-        : chat.bindings.claude
-          ? "claude"
+      chat.activeTarget = chat.bindings.lead
+        ? "lead"
+        : chat.bindings.partner
+          ? "partner"
           : null;
     }
 
-    if (!chat.bindings.codex && !chat.bindings.claude) {
+    if (!chat.bindings.lead && !chat.bindings.partner) {
       this.#chats.delete(chatKey);
       return this.#emptyState();
     }
 
-    if (!chat.bindings.codex || !chat.bindings.claude || !chat.activeTarget) {
+    if (!chat.bindings.lead || !chat.bindings.partner) {
       chat.xcheck.enabled = false;
       chat.collab.enabled = false;
     }
@@ -311,6 +320,7 @@ export class DirectSessionManager {
   }
 
   async #sendDirect(
+    role: DirectRole,
     binding: DirectBinding,
     text: string,
     options?: DirectDispatchOptions,
@@ -319,6 +329,7 @@ export class DirectSessionManager {
       return await this.#withSingleOutput(
         {
           type: "agent",
+          role,
           phase: "default",
           result: await binding.send(text),
         },
@@ -326,7 +337,7 @@ export class DirectSessionManager {
       );
     } catch (err) {
       return await this.#withSingleOutput(
-        { type: "system", text: `Failed to send to ${binding.agent}: ${err}` },
+        { type: "system", text: `Failed to send to ${role} (${binding.agent}): ${err}` },
         options,
       );
     }
@@ -349,7 +360,7 @@ export class DirectSessionManager {
     const outputs: DirectDispatchOutput[] = [];
     chat.xcheck.lastError = null;
     chat.xcheck.run = {
-      step: "owner-draft",
+      step: "lead-draft",
       startedAt: Date.now(),
       stopRequested: false,
       round: 1,
@@ -357,11 +368,12 @@ export class DirectSessionManager {
     };
 
     try {
-      let draft = await pair.activeBinding.send(userText);
+      let draft = await pair.leadBinding.send(userText);
       await this.#pushOutput(
         outputs,
         {
           type: "agent",
+          role: "lead",
           phase: "draft",
           result: draft,
         },
@@ -380,15 +392,16 @@ export class DirectSessionManager {
       }
 
       for (let round = 1; round <= chat.xcheck.rounds; round += 1) {
-        chat.xcheck.run.step = "reviewer-review";
+        chat.xcheck.run.step = "partner-review";
         chat.xcheck.run.round = round;
-        const review = await pair.otherBinding.send(
-          buildXcheckReviewPrompt(pair.active, userText, draft.text, round, chat.xcheck.rounds),
+        const review = await pair.partnerBinding.send(
+          buildXcheckReviewPrompt(userText, draft.text, round, chat.xcheck.rounds),
         );
         await this.#pushOutput(
           outputs,
           {
             type: "agent",
+            role: "partner",
             phase: "review",
             result: review,
           },
@@ -407,14 +420,15 @@ export class DirectSessionManager {
         }
 
         if (round === chat.xcheck.rounds) {
-          chat.xcheck.run.step = "owner-final";
-          const final = await pair.activeBinding.send(
-            buildXcheckFinalPrompt(pair.other, userText, review.text, round, chat.xcheck.rounds),
+          chat.xcheck.run.step = "lead-final";
+          const final = await pair.leadBinding.send(
+            buildXcheckFinalPrompt(userText, review.text, round, chat.xcheck.rounds),
           );
           await this.#pushOutput(
             outputs,
             {
               type: "agent",
+              role: "lead",
               phase: "final",
               result: final,
             },
@@ -423,15 +437,16 @@ export class DirectSessionManager {
           return outputs;
         }
 
-        chat.xcheck.run.step = "owner-draft";
+        chat.xcheck.run.step = "lead-draft";
         chat.xcheck.run.round = round + 1;
-        draft = await pair.activeBinding.send(
-          buildXcheckRevisionPrompt(pair.other, userText, review.text, round + 1, chat.xcheck.rounds),
+        draft = await pair.leadBinding.send(
+          buildXcheckRevisionPrompt(userText, review.text, round + 1, chat.xcheck.rounds),
         );
         await this.#pushOutput(
           outputs,
           {
             type: "agent",
+            role: "lead",
             phase: "draft",
             result: draft,
           },
@@ -453,7 +468,7 @@ export class DirectSessionManager {
       return outputs;
     } catch (err) {
       chat.xcheck.lastError = String(err);
-      const step = chat.xcheck.run?.step ?? "owner-draft";
+      const step = chat.xcheck.run?.step ?? "lead-draft";
       await this.#pushOutput(
         outputs,
         {
@@ -498,7 +513,8 @@ export class DirectSessionManager {
 
       for (let round = 1; round <= chat.collab.rounds; round += 1) {
         const isLeadTurn = round % 2 === 1;
-        const currentBinding = isLeadTurn ? pair.activeBinding : pair.otherBinding;
+        const role: DirectRole = isLeadTurn ? "lead" : "partner";
+        const currentBinding = isLeadTurn ? pair.leadBinding : pair.partnerBinding;
 
         chat.collab.run.step = isLeadTurn ? "lead-turn" : "partner-turn";
         chat.collab.run.round = round;
@@ -516,6 +532,7 @@ export class DirectSessionManager {
           outputs,
           {
             type: "agent",
+            role,
             phase: "collab",
             result: response,
           },
@@ -590,12 +607,11 @@ export class DirectSessionManager {
   }
 
   #snapshotXcheck(chat: DirectChatRuntime): DirectXcheckSnapshot {
-    const { active: owner, other: reviewer } = this.#pairedAgents(chat);
     return {
       enabled: chat.xcheck.enabled,
       rounds: chat.xcheck.rounds,
-      owner,
-      reviewer,
+      lead: chat.bindings.lead?.agent ?? null,
+      partner: chat.bindings.partner?.agent ?? null,
       runState: chat.xcheck.run ? "running" : "idle",
       step: chat.xcheck.run?.step ?? null,
       round: chat.xcheck.run?.round ?? null,
@@ -606,12 +622,11 @@ export class DirectSessionManager {
   }
 
   #snapshotCollab(chat: DirectChatRuntime): DirectCollabSnapshot {
-    const { active: lead, other: partner } = this.#pairedAgents(chat);
     return {
       enabled: chat.collab.enabled,
       rounds: chat.collab.rounds,
-      lead,
-      partner,
+      lead: chat.bindings.lead?.agent ?? null,
+      partner: chat.bindings.partner?.agent ?? null,
       runState: chat.collab.run ? "running" : "idle",
       step: chat.collab.run?.step ?? null,
       round: chat.collab.run?.round ?? null,
@@ -621,37 +636,13 @@ export class DirectSessionManager {
     };
   }
 
-  #pairedAgents(chat: DirectChatRuntime): { active: DirectAgent | null; other: DirectAgent | null } {
-    const active = chat.activeTarget;
-    if (!active) {
-      return { active: null, other: null };
-    }
-
-    const other =
-      active === "codex"
-        ? chat.bindings.claude
-          ? "claude"
-          : null
-        : chat.bindings.codex
-          ? "codex"
-          : null;
-
-    return { active, other };
-  }
-
   #requirePair(chat: DirectChatRuntime, modeName: "Xcheck" | "Collab"): DirectPair {
-    const { active, other } = this.#pairedAgents(chat);
-    if (!active || !other) {
-      throw new Error(`${modeName} requires both codex and claude to be bound and an active target selected`);
+    const leadBinding = chat.bindings.lead;
+    const partnerBinding = chat.bindings.partner;
+    if (!leadBinding || !partnerBinding) {
+      throw new Error(`${modeName} requires both lead and partner sessions to be bound`);
     }
-
-    const activeBinding = chat.bindings[active];
-    const otherBinding = chat.bindings[other];
-    if (!activeBinding || !otherBinding) {
-      throw new Error(`${modeName} bindings are incomplete for this chat`);
-    }
-
-    return { active, other, activeBinding, otherBinding };
+    return { leadBinding, partnerBinding };
   }
 
   #activeModeRun(
@@ -670,6 +661,25 @@ export class DirectSessionManager {
     const activeMode = this.#activeModeRun(chat);
     if (activeMode) {
       throw new Error(`Cannot ${action} while ${activeMode.name} is running`);
+    }
+  }
+
+  #assertUniqueRoleSession(
+    chat: DirectChatRuntime,
+    role: DirectRole,
+    agent: DirectAgent,
+    sessionId: string,
+  ): void {
+    const otherRole: DirectRole = role === "lead" ? "partner" : "lead";
+    const otherBinding = chat.bindings[otherRole];
+    if (!otherBinding) {
+      return;
+    }
+
+    if (otherBinding.agent === agent && otherBinding.sessionId() === sessionId) {
+      throw new Error(
+        `Cannot bind ${role} to the same ${agent} session ${sessionId} already used by ${otherRole}; bind a separate session instead`,
+      );
     }
   }
 
@@ -698,8 +708,8 @@ export class DirectSessionManager {
       xcheck: {
         enabled: false,
         rounds: 1,
-        owner: null,
-        reviewer: null,
+        lead: null,
+        partner: null,
         runState: "idle",
         step: null,
         round: null,
@@ -750,68 +760,62 @@ export class DirectSessionManager {
 export const directSessions = new DirectSessionManager();
 
 function buildXcheckReviewPrompt(
-  owner: DirectAgent,
   userText: string,
   draft: string,
   round: number,
   totalRounds: number,
 ): string {
   return [
-    "Cross-check mode: review the other agent's draft only.",
+    "Cross-check mode: you are the partner reviewing the lead's draft only.",
     "Do not answer the user directly.",
     "Point out concrete mistakes, risks, or missing edge cases.",
     "",
     `Round: ${round}/${totalRounds}`,
-    `Owner: ${owner}`,
     "Original user message:",
     userText,
     "",
-    "Draft to review:",
+    "Lead draft to review:",
     draft,
   ].join("\n");
 }
 
 function buildXcheckRevisionPrompt(
-  reviewer: DirectAgent,
   userText: string,
   review: string,
   round: number,
   totalRounds: number,
 ): string {
   return [
-    "Cross-check mode: revise your previous draft using the review below.",
+    "Cross-check mode: you are the lead revising your previous draft using the partner review below.",
     "Return an updated draft only.",
     "Do not return the final user-facing answer yet.",
     "Another review round will follow after this draft.",
     "",
     `Round: ${round}/${totalRounds}`,
-    `Reviewer: ${reviewer}`,
     "Original user message:",
     userText,
     "",
-    "Reviewer feedback:",
+    "Partner feedback:",
     review,
   ].join("\n");
 }
 
 function buildXcheckFinalPrompt(
-  reviewer: DirectAgent,
   userText: string,
   review: string,
   round: number,
   totalRounds: number,
 ): string {
   return [
-    "Cross-check mode: revise your previous draft using the review below.",
+    "Cross-check mode: you are the lead revising your previous draft using the partner review below.",
     "Return the final user-facing answer.",
     "Incorporate good feedback and ignore bad feedback if needed.",
     "",
     `Final round: ${round}/${totalRounds}`,
-    `Reviewer: ${reviewer}`,
     "Original user message:",
     userText,
     "",
-    "Reviewer feedback:",
+    "Partner feedback:",
     review,
   ].join("\n");
 }
@@ -822,12 +826,12 @@ function buildCollabPartnerPrompt(text: string): string {
 
 function formatXcheckStep(step: DirectXcheckStep): string {
   switch (step) {
-    case "owner-draft":
-      return "owner draft";
-    case "reviewer-review":
-      return "reviewer review";
-    case "owner-final":
-      return "owner final";
+    case "lead-draft":
+      return "lead draft";
+    case "partner-review":
+      return "partner review";
+    case "lead-final":
+      return "lead final";
   }
 }
 
