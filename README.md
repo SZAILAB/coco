@@ -32,9 +32,7 @@ npm install
 
 ![飞书应用凭证](docs/images/feishu-app-credentials.png)
 
-`App ID` 不算密钥，但公开截图里最好还是打码或用假值；`App Secret` 不要明文出现在截图或提交记录里。
-
-3. 在「添加应用能力」里添加「机器人」，记住机器人名称
+3. 在「添加应用能力」里添加「机器人」
 
 ![添加机器人能力](docs/images/feishu-bot-capability.png)
 
@@ -42,13 +40,11 @@ npm install
 
 ![开通消息权限](docs/images/feishu-permissions.png)
 
-如果要在群聊里用，按飞书控制台提示补群聊消息权限即可。
-
 5. 在「事件与回调」里选择「使用长连接接收事件」，添加 `im.message.receive_v1`
 
 ![配置长连接事件](docs/images/feishu-event-subscription.png)
 
-这里走长连接，不需要公网回调 URL，也不需要 ngrok。
+这里走长连接，不需要公网回调 URL。
 
 6. 在「版本管理与发布」里发布版本
 
