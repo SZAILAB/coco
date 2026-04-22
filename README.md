@@ -131,6 +131,14 @@ COCO_TELEGRAM_USERS=你的_numeric_user_id \
 npm run telegram
 ```
 
+## 使用前注意
+
+`coco` 现在是 resume 一个已有的逻辑会话，不是 attach 到你电脑上正在打开的 terminal。
+
+如果你在飞书里继续了某个 Codex / Claude 会话，电脑上原来开着的 session 不会自动看到手机侧新增的聊天记录。回到电脑后，建议先退出原来的 session，再用同一个 `thread_id` / `session_id` resume。
+
+尽量不要同时在电脑端和飞书端操作同一个 session。
+
 ## /coco 命令
 
 所有 `coco` 自己的控制命令都以 `/coco` 开头。其他普通消息会发给当前绑定的 agent。
