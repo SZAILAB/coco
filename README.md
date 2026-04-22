@@ -10,62 +10,9 @@
 
 这版 README 只讲 `coco` 当前最实用的 direct-session 用法，重点放在 **飞书**。
 
-## coco 现在适合做什么
-
-- 通过 **飞书** 继续一个已有的 Claude session
-- 通过 **飞书** 继续一个已有的 Codex session
-- 在同一个聊天里同时绑定一个 Codex 和一个 Claude
-- 在两者之间切换默认目标
-- 临时把某一条消息定向发给另一侧 agent
-- 让默认 agent 先起草，再让另一侧 agent review，最后回到默认 agent 出 final
-- 让默认 agent 和另一侧 agent 做有限 turn 数的原样 relay 协作
-
-## 当前边界
-
-这版 direct-session 很刻意地收得很小：
-
-- 只支持你**手动提供**已有 session id / thread id
-- 只支持 resume，不做 latest-session bridge
-- 不做 Claude fork
-- 不做 tmux attach
-- 不做 session list
-- binding 目前还是**进程内状态**
-  - bot 重启后需要重新 bind
-- `xcheck` 目前是**有限轮数**模式
-  - 默认 1 轮
-  - 不做无限互评
-  - 不做自动 hard timeout
-- `collab` 目前也是**有限 turn 数**模式
-  - 默认 1 turn
-  - 不做无限讨论
-  - 不做自动 hard timeout
-  - 不做额外 final synthesis
-
-也就是说，当前正确的心智模型是：
-
-- `coco` 不是自己发明一套会话
-- `coco` 是帮你**接回一个已经存在的会话**
-
-## Direct Session 模型
-
-每个绑定都由 3 个信息组成：
-
-- `agent`
-- `session_id` / `thread_id`
-- `cwd`
-
-这里的 `cwd` 不是附属信息，而是 binding 的一部分。
-
-原因很简单：
-
-- Claude 的 session 本来就和项目目录强相关
-- Codex resume 后这轮真正工作的 repo / 文件上下文，也取决于 `cwd`
-
-所以在使用上，你只需要记住一件事：
-
-- 绑定已有 session 时，除了 `session_id` / `thread_id`，还必须提供它原来的工作目录
-
 ## 安装
+
+新 clone 下来后，先装一次依赖：
 
 ```bash
 cd /path/to/coco
@@ -74,26 +21,43 @@ npm install
 
 ## 飞书优先
 
-如果你只打算先接一个远程入口，当前更推荐 **飞书**。
+### 飞书 Bot Setup
 
-原因：
+`coco` 用的是飞书**企业自建应用里的机器人**，不是群聊里的自定义 webhook 机器人。
 
-- 我们已经做过真机 smoke
-- 命令面已经打通
-- 适合手机直接继续已有会话
+最短路径：
 
-### 飞书启动
+1. 打开 [飞书开放平台应用管理](https://open.feishu.cn/app)，创建或进入一个企业自建应用
+2. 在「凭证与基础信息」里复制 `App ID` 和 `App Secret`
+
+![飞书应用凭证](docs/images/feishu-app-credentials.png)
+
+`App ID` 不算密钥，但公开截图里最好还是打码或用假值；`App Secret` 不要明文出现在截图或提交记录里。
+
+3. 在「添加应用能力」里添加「机器人」，记住机器人名称
+
+![添加机器人能力](docs/images/feishu-bot-capability.png)
+
+4. 在「权限管理」里开通消息权限：`im:message`、`im:message.p2p_msg:readonly`
+
+![开通消息权限](docs/images/feishu-permissions.png)
+
+如果要在群聊里用，按飞书控制台提示补群聊消息权限即可。
+
+5. 在「事件与回调」里选择「使用长连接接收事件」，添加 `im.message.receive_v1`
+
+![配置长连接事件](docs/images/feishu-event-subscription.png)
+
+这里走长连接，不需要公网回调 URL，也不需要 ngrok。
+
+6. 在「版本管理与发布」里发布版本
+
+![发布应用版本](docs/images/feishu-release.png)
+
+7. 把 `App ID` 和 `App Secret` 写进仓库根目录的 `.env.local`
 
 ```bash
 cd /path/to/coco
-COCO_FEISHU_APP_ID=你的_app_id \
-COCO_FEISHU_APP_SECRET=你的_app_secret \
-npm run feishu
-```
-
-也可以先复制示例文件，再把配置写进仓库根目录下的 `.env.local`。`npm run feishu` 会自动加载 `.env` 和 `.env.local`：
-
-```bash
 cp .env.local.example .env.local
 ```
 
@@ -101,6 +65,46 @@ cp .env.local.example .env.local
 COCO_FEISHU_APP_ID=你的_app_id
 COCO_FEISHU_APP_SECRET=你的_app_secret
 ```
+
+8. 本地启动 bot
+
+```bash
+npm run feishu
+```
+
+**如果在服务器上启动，强烈推荐使用 tmux**
+
+```bash
+tmux new -s feishubot
+npm run feishu
+```
+
+启动成功后，终端会看到：
+
+```text
+[feishu] Starting bot...
+[feishu] Bot is running
+```
+
+9. 去飞书客户端搜索机器人名称，发送 `/coco current`
+
+```text
+/coco current
+```
+
+如果 bot 回复类似下面的内容，就说明飞书 setup 已经完成：
+
+```text
+Direct session state:
+Active: none
+No direct session bindings.
+Xcheck: off
+Collab: off
+```
+
+如果回复 `Not authorized.`，说明飞书链路已经通了，但 `.env.local` 里的 `COCO_FEISHU_USERS` 或 `COCO_FEISHU_CHATS` allowlist 把当前用户或聊天限制住了。
+
+#### 高级配置
 
 如果你想一次启动多个飞书 bot，可以在 `.env.local` 里写多组带编号的配置：
 
@@ -117,35 +121,6 @@ COCO_FEISHU_APP_SECRET_2=你的_app_secret_2
 - 仍然使用同一个命令：`npm run feishu`
 - 如果检测到带编号的多组配置，运行时会一次启动全部 bot
 - 每个 bot 的聊天状态都会独立隔离，不会串 `codex` / `claude` session
-- `COCO_FEISHU_DOMAIN`、`COCO_FEISHU_PROXY`、`COCO_FEISHU_USERS`、`COCO_FEISHU_CHATS` 这类可选配置会对全部 bot 一起生效
-- 如果同时写了单 bot 配置和多 bot 编号配置，运行时会优先使用带编号的多 bot 配置
-
-可选环境变量：
-
-- `COCO_FEISHU_DOMAIN`
-- `COCO_FEISHU_PROXY`
-- `COCO_FEISHU_USERS`
-- `COCO_FEISHU_CHATS`
-- `COCO_CODEX_RESUME_MAX_ATTEMPTS`
-- `COCO_CODEX_RESUME_RETRY_DELAY_MS`
-
-如果你的机器访问飞书开放平台需要走代理，设置 `COCO_FEISHU_PROXY` 即可。未设置时，运行时会回退读取标准代理环境变量（如 `HTTPS_PROXY` / `ALL_PROXY`）。
-
-如果你经常通过飞书继续 Codex，会话转发现在会对**瞬时传输失败**做一次保守重试：
-
-- 默认总尝试次数是 `5`（首次 + 4 次重试）
-- 默认重试等待 `3000ms`
-- 只有在 Codex 还**没有输出任何 assistant 文本**时才会自动重试
-- 一旦已经开始产出文本，`coco` 不会自动重放这条消息，避免把同一条 prompt 发两次
-
-如果你想关闭这层自动重试，可以把 `COCO_CODEX_RESUME_MAX_ATTEMPTS=1`。
-
-启动成功后，终端会看到：
-
-```text
-[feishu] Starting bot...
-[feishu] Bot is running
-```
 
 ## Telegram
 
@@ -162,325 +137,86 @@ npm run telegram
 
 ## /coco 命令
 
-所有 bot 自己的 direct-session 控制命令都在 `/coco ...` 命名空间下。
+所有 `coco` 自己的控制命令都以 `/coco` 开头。其他普通消息会发给当前绑定的 agent。
 
-这点很重要，因为 Codex / Claude 自己也有 slash command。
-
-规则是：
-
-- 所有 `/coco ...` 会被 bot 拦截
-- 其他所有消息都会发给当前 active target
-- 这也包括 agent 自己的 slash command，比如 `/compact`
-- 如果 `xcheck` 已开启，普通消息会走 `lead draft <-> partner review` 的有限轮数流程，最后再由 lead 输出 final
-- 如果 `collab` 已开启，普通消息会在两个已绑定 session 之间按 turn 数交替 relay；其中 lead 发给 partner 的内容会包上 `executor message` 边界
-- 但像 `/compact` 这样的 agent slash command 仍然会直接发给当前 active target，不走 `xcheck` / `collab`
-
-如果当前 chat 里还没有 active target：
-
-- 普通消息不会被处理
-- bot 会根据当前绑定状态提示你：
-- 如果要直接聊天，先执行 `/coco bind lead ...`
-- 如果要 `xcheck` / `collab`，同时绑定 `lead` 和 `partner`
-
-### 1. `/coco help`
-
-查看帮助：
+完整命令列表可以直接在飞书里发：
 
 ```text
 /coco help
 ```
 
-### 2. `/coco bind lead <codex|claude> <session_id> <cwd>`
+### 绑定一个已有会话
 
-绑定 `lead` 角色到一个已有的 Codex 或 Claude 会话：
-
-```text
-/coco bind lead codex abc123 /path/to/project
-```
-
-### 3. `/coco bind partner <codex|claude> <session_id> <cwd>`
-
-绑定 `partner` 角色到一个已有的 Codex 或 Claude 会话：
+最常用的是先绑定 `lead`：
 
 ```text
-/coco bind partner claude 3f101bd8-767e-49fa-94e5-39a2eecbe08c /path/to/project
+/coco bind lead codex <thread_id> <cwd>
 ```
 
-### 4. `/coco use <lead|partner>`
-
-切换当前默认目标：
+如果是 Claude，就是：
 
 ```text
-/coco use lead
-/coco use partner
+/coco bind lead claude <session_id> <cwd>
 ```
 
-设置之后，任何**非 `/coco`** 消息都会自动发给当前目标。
+这里：
 
-### 5. `/coco ask <lead|partner> <text>`
+- `thread_id` 是 Codex 会话 id
+- `session_id` 是 Claude 会话 id
+- `cwd` 是这个会话原来的项目目录
 
-单次定向发消息，但**不切换默认目标**：
+绑定成功后，直接在飞书里发普通消息即可继续这个会话。
+
+如果想让两个 agent 协作，再绑定 `partner`：
 
 ```text
-/coco ask partner 帮我 review 一下刚才 lead 的回复
-/coco ask lead 请你回应一下刚才 partner 的意见
+/coco bind partner codex <thread_id> <cwd>
 ```
 
-### 6. `/coco current`
+### collab 模式
 
-查看当前绑定状态：
+`collab` 会让 `lead` 和 `partner` 按 turn 数来回 relay。
+
+在绑定了 `lead` 和 `partner` 之后：
 
 ```text
-/coco current
+/coco collab on 3
 ```
 
-它会显示：
+之后你发一条普通消息，bot 会让两个已绑定会话来回接力 3 turn。
 
-- 当前 active target
-- 当前 chat 绑定了哪些 agent
-- 每个 binding 的 session id
-- 每个 binding 的 cwd
-- 当前状态（`ready / busy / error / exited`）
-
-### 7. `/coco detach [codex|claude]`
-
-解除绑定：
-
-```text
-/coco detach
-/coco detach claude
-/coco detach codex
-```
-
-不带参数时，默认 detach 当前 active target。
-
-### 8. `/coco xcheck on [rounds]`
-
-开启有限轮数的 cross-check：
-
-```text
-/coco xcheck on
-/coco xcheck on 10
-```
-
-前提：
-
-- 当前 chat 里已经同时绑定 `codex` 和 `claude`
-- 当前已经有 active target
-
-开启后：
-
-- `owner = 当前 active target`
-- `reviewer = 另一侧 agent`
-- 如果此前 `collab` 是开启状态，会被自动关闭
-
-默认 `rounds = 1`。
-
-每条普通消息都会执行一轮完整 `xcheck`：
-
-1. 用户消息发给 owner
-2. owner 输出第 1 版 draft
-3. reviewer 基于当前 draft 输出 review
-4. 如果还有剩余轮数，owner 基于 review 再出下一版 draft，继续往返
-5. 最后一轮 review 之后，owner 输出 final
-
-这一轮结束后，下一条普通消息才会再次触发新一轮。
-
-### 9. `/coco xcheck off`
-
-关闭 `xcheck` 模式：
-
-```text
-/coco xcheck off
-```
-
-关闭后，普通消息恢复成只发给当前 active target。
-
-### 10. `/coco xcheck status`
-
-查看当前 `xcheck` 状态：
-
-```text
-/coco xcheck status
-```
-
-它会显示：
-
-- 是否开启
-- 当前 owner / reviewer
-- 配置的 rounds
-- 当前 run 是 `idle` 还是 `running`
-- 如果正在运行，当前进行到第几轮
-- 如果正在运行，当前停在哪个 step
-- 是否已经请求 stop
-- 最近一次错误
-
-### 11. `/coco xcheck stop`
-
-停止当前正在执行的这一轮：
-
-```text
-/coco xcheck stop
-```
-
-注意：
-
-- 这不会关闭 `xcheck mode`
-- 它是**协作式停止**
-- 也就是会等当前这一步执行完，再不进入下一步
-
-### 12. `/coco collab on [turns]`
-
-开启有限 turn 数的协作模式：
-
-```text
-/coco collab on
-/coco collab on 5
-```
-
-前提：
-
-- 当前 chat 里已经同时绑定 `codex` 和 `claude`
-- 当前已经有 active target
-
-开启后：
-
-- `lead = 当前 active target`（这里只表示第一位开口的 agent）
-- `partner = 另一侧 agent`
-- 如果此前 `xcheck` 是开启状态，会被自动关闭
-
-默认 `turns = 1`。
-
-每条普通消息都会执行一轮有限 turn 的 `collab`：
-
-1. 用户消息先发给 lead
-2. lead 先回复
-3. 从第二 turn 开始，lead 收到 partner 的原始上一条回复；partner 收到 lead 的上一条回复时会被包成 `executor message`
-4. bot 不会额外包任何 `collab` 总结；只有 lead -> partner 的 relay 会增加这个边界包装
-5. 跑满配置的 turns 后停止，不做额外 final synthesis
-6. 如果连续 4 次回复在去掉空白后都少于 30 个字符，会提前停止当前这一轮 `collab`
-
-这一轮结束后，下一条普通消息才会再次触发新一轮。
-
-### 13. `/coco collab off`
-
-关闭 `collab` 模式：
+关闭：
 
 ```text
 /coco collab off
 ```
 
-关闭后，普通消息恢复成只发给当前 active target。
-
-### 14. `/coco collab status`
-
-查看当前 `collab` 状态：
-
-```text
-/coco collab status
-```
-
-它会显示：
-
-- 是否开启
-- 当前 lead / partner
-- 配置的 rounds
-- 当前 run 是 `idle` 还是 `running`
-- 如果正在运行，当前进行到第几轮
-- 如果正在运行，当前停在哪个 step
-- 是否已经请求 stop
-- 最近一次错误
-
-### 15. `/coco collab stop`
-
-停止当前正在执行的这一轮：
+也可以让中途停止：
 
 ```text
 /coco collab stop
 ```
 
-注意：
-
-- 这不会关闭 `collab mode`
-- 它是**协作式停止**
-- 也就是会等当前这一步执行完，再不进入下一步
-
 ## 最推荐的飞书工作流
 
-### 场景 1：只继续一个 Claude 会话
-
-```text
-/coco bind lead claude <session_id> <cwd>
-/coco current
-继续刚才的话题，用一句话告诉我我们现在在做什么
-```
-
-### 场景 2：只继续一个 Codex 会话
+### 只继续一个已有会话
 
 ```text
 /coco bind lead codex <thread_id> <cwd>
 /coco current
-继续刚才那个实现
+<你要发给codex的信息>
 ```
 
-### 场景 3：同一个聊天同时绑定 Codex 和 Claude
+如果继续 Claude 会话，把 `codex <thread_id>` 换成 `claude <session_id>`。
+
+### 两个session之间自己协作
 
 ```text
 /coco bind lead codex <thread_id> <cwd>
-/coco bind partner claude <session_id> <cwd>
+/coco bind partner codex <thread_id> <cwd>
 /coco current
-/coco use lead
-继续做刚才那个修改
-/coco ask partner 帮我 review 一下刚才 lead 的思路
-/coco use partner
-你再展开讲一下刚才的 review
-```
-
-这是目前最接近你真实工作流的使用方式。
-
-### 场景 4：多轮 xcheck
-
-```text
-/coco bind lead codex <thread_id> <cwd>
-/coco bind partner claude <session_id> <cwd>
-/coco use lead
-/coco xcheck on 10
-帮我把这个改动方案写完整
-```
-
-这时 bot 会按 turns 交替输出，例如：
-
-```text
-[lead codex draft <thread_id>]
-...
-
-[partner claude review <session_id>]
-...
-
-[lead codex draft <thread_id>]
-...
-
-[partner claude review <session_id>]
-...
-
-[lead codex final <thread_id>]
-...
-```
-
-如果这轮还没跑完，你又发了一条普通消息，bot 会提示：
-
-```text
-xcheck already running, please wait
-```
-
-### 场景 5：多轮 collab
-
-```text
-/coco bind lead codex <thread_id> <cwd>
-/coco bind partner claude <session_id> <cwd>
-/coco use lead
-/coco collab on 3
-帮我把这个方案补强一下，互相接着聊几轮
+/coco collab on 20
+<你要让他们互相对话的信息，这个信息默认先发给lead>
 ```
 
 这时 bot 会按轮数来回输出，例如：
@@ -489,7 +225,7 @@ xcheck already running, please wait
 [lead codex collab <thread_id>]
 ...
 
-[partner claude collab <session_id>]
+[partner codex collab <thread_id>]
 ...
 
 [lead codex collab <thread_id>]
@@ -501,50 +237,6 @@ xcheck already running, please wait
 ```text
 collab already running, please wait
 ```
-
-## 回复长什么样
-
-bot 回复时会带来源前缀，例如：
-
-```text
-[lead claude 3f101bd8-767e-49fa-94e5-39a2eecbe08c]
-...
-```
-
-或者：
-
-```text
-[partner codex abc123]
-...
-```
-
-`xcheck` 模式下则会看到带 phase 的前缀：
-
-```text
-[lead codex draft abc123]
-...
-
-[partner claude review 3f101bd8-767e-49fa-94e5-39a2eecbe08c]
-...
-
-[lead codex final abc123]
-...
-```
-
-`collab` 模式下则会看到：
-
-```text
-[lead codex collab abc123]
-...
-
-[partner claude collab 3f101bd8-767e-49fa-94e5-39a2eecbe08c]
-...
-
-[lead codex collab abc123]
-...
-```
-
-这样你不会混淆当前是哪一侧在说话。
 
 ## 注意事项
 
@@ -567,44 +259,3 @@ bot 回复时会带来源前缀，例如：
 - Telegram / Feishu 进程重启
 
 之后都需要重新执行 `/coco bind ...`
-
-### 3. 当前不做 list
-
-也就是说：
-
-- 你不能在 bot 里列出现有 session
-- 你必须自己知道要继续的 `session_id` / `thread_id`
-
-### 4. 当前不做 tmux attach
-
-`coco` 现在支持的是：
-
-- 继续一个已有的**逻辑会话**
-
-它现在还不支持的是：
-
-- attach 到一个你已经开着的 tmux pane
-- 直接接管那个活着的 terminal 进程
-
-这件事后面会再做。
-
-## 项目结构（只列当前最相关部分）
-
-```text
-coco/
-  src/
-    feishu.ts
-    feishu-runtime.ts
-    telegram.ts
-    coco-commands.ts
-    direct-backend.ts
-    direct-session.ts
-```
-
-## 当前最值得继续做的方向
-
-- direct-session binding 持久化
-- session list
-- tmux attach mode
-
-这三件里，真正最贴近实际工作流的是 **tmux attach mode**，但在它之前，`session-first` 这套 resume 逻辑已经足够让你在飞书上继续已有的 Codex / Claude 会话。
