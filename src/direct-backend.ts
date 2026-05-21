@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,8 @@ import { createInterface } from "node:readline";
 export type DirectAgent = "codex" | "claude";
 export type DirectBindingStatus = "ready" | "busy" | "error" | "exited";
 type SpawnProcess = typeof spawn;
+
+export const PENDING_DIRECT_SESSION_ID = "(new)";
 
 export type DirectSendResult = {
   agent: DirectAgent;
@@ -51,21 +54,32 @@ export async function createDirectBinding(
   return ClaudeResumeBinding.create(sessionId, cwd);
 }
 
+export async function createNewDirectBinding(
+  agent: DirectAgent,
+  cwd: string,
+): Promise<DirectBinding> {
+  assertCwdExists(cwd);
+  if (agent === "codex") {
+    return new CodexResumeBinding(null, cwd);
+  }
+  return ClaudeResumeBinding.createNew(cwd);
+}
+
 class CodexResumeBinding implements DirectBinding {
   readonly agent = "codex" as const;
 
-  #sessionId: string;
+  #sessionId: string | null;
   #cwd: string;
   #status: DirectBindingStatus = "ready";
   #error: string | null = null;
 
-  constructor(sessionId: string, cwd: string) {
+  constructor(sessionId: string | null, cwd: string) {
     this.#sessionId = sessionId;
     this.#cwd = cwd;
   }
 
   sessionId(): string {
-    return this.#sessionId;
+    return this.#sessionId ?? PENDING_DIRECT_SESSION_ID;
   }
 
   cwd(): string {
@@ -92,7 +106,9 @@ class CodexResumeBinding implements DirectBinding {
     this.#error = null;
 
     try {
-      const result = await runCodexResumeTurn(this.#cwd, this.#sessionId, prompt);
+      const result = this.#sessionId
+        ? await runCodexResumeTurn(this.#cwd, this.#sessionId, prompt)
+        : await runCodexNewTurn(this.#cwd, prompt);
       this.#sessionId = result.sessionId;
       this.#status = "ready";
       return result;
@@ -127,7 +143,13 @@ class ClaudeResumeBinding implements DirectBinding {
     | null = null;
 
   static async create(sessionId: string, cwd: string): Promise<ClaudeResumeBinding> {
-    const child = await spawnClaudeResumeProcess(sessionId, cwd);
+    const child = await spawnClaudeProcess({ sessionId, cwd, resume: true });
+    return new ClaudeResumeBinding(sessionId, cwd, child);
+  }
+
+  static async createNew(cwd: string): Promise<ClaudeResumeBinding> {
+    const sessionId = randomUUID();
+    const child = await spawnClaudeProcess({ sessionId, cwd, resume: false });
     return new ClaudeResumeBinding(sessionId, cwd, child);
   }
 
@@ -341,9 +363,21 @@ class ClaudeResumeBinding implements DirectBinding {
   }
 }
 
+async function runCodexNewTurn(cwd: string, prompt: string): Promise<DirectSendResult> {
+  return await runCodexTurn(cwd, null, prompt);
+}
+
 async function runCodexResumeTurn(
   cwd: string,
   sessionId: string,
+  prompt: string,
+): Promise<DirectSendResult> {
+  return await runCodexTurn(cwd, sessionId, prompt);
+}
+
+async function runCodexTurn(
+  cwd: string,
+  sessionId: string | null,
   prompt: string,
 ): Promise<DirectSendResult> {
   let currentSessionId = sessionId;
@@ -358,10 +392,15 @@ async function runCodexResumeTurn(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      return await runCodexResumeTurnOnce(cwd, currentSessionId, prompt);
+      return await runCodexTurnOnce(cwd, currentSessionId, prompt);
     } catch (err) {
-      const normalized = toCodexResumeTurnError(err, currentSessionId);
-      currentSessionId = normalized.sessionId;
+      const normalized = toCodexResumeTurnError(
+        err,
+        currentSessionId ?? PENDING_DIRECT_SESSION_ID,
+      );
+      if (normalized.sessionId !== PENDING_DIRECT_SESSION_ID) {
+        currentSessionId = normalized.sessionId;
+      }
 
       if (!normalized.retryable || attempt >= maxAttempts) {
         if (attempt === 1) {
@@ -371,7 +410,7 @@ async function runCodexResumeTurn(
       }
 
       console.warn(
-        `[codex] transient resume failure for ${currentSessionId} (attempt ${attempt}/${maxAttempts}), retrying in ${retryDelayMs}ms: ${normalized.message}`,
+        `[codex] transient failure for ${currentSessionId ?? PENDING_DIRECT_SESSION_ID} (attempt ${attempt}/${maxAttempts}), retrying in ${retryDelayMs}ms: ${normalized.message}`,
       );
       await delay(retryDelayMs);
     }
@@ -380,23 +419,32 @@ async function runCodexResumeTurn(
   throw new Error("codex transport failed before any resume attempt completed");
 }
 
-async function runCodexResumeTurnOnce(
+async function runCodexTurnOnce(
   cwd: string,
-  sessionId: string,
+  sessionId: string | null,
   prompt: string,
 ): Promise<DirectSendResult> {
   return await new Promise<DirectSendResult>((resolve, reject) => {
+    const args = sessionId
+      ? [
+          "exec",
+          "resume",
+          "--skip-git-repo-check",
+          "--dangerously-bypass-approvals-and-sandbox",
+          sessionId,
+          "--json",
+          prompt,
+        ]
+      : [
+          "exec",
+          "--skip-git-repo-check",
+          "--dangerously-bypass-approvals-and-sandbox",
+          "--json",
+          prompt,
+        ];
     const child = directBackendRuntime.spawn(
       "codex",
-      [
-        "exec",
-        "resume",
-        "--skip-git-repo-check",
-        "--dangerously-bypass-approvals-and-sandbox",
-        sessionId,
-        "--json",
-        prompt,
-      ],
+      args,
       {
         cwd,
         stdio: ["ignore", "pipe", "pipe"],
@@ -404,7 +452,7 @@ async function runCodexResumeTurnOnce(
     );
 
     let stderr = "";
-    let currentSessionId = sessionId;
+    let currentSessionId = sessionId ?? PENDING_DIRECT_SESSION_ID;
     let done = false;
     let turnFailure: string | null = null;
     let streamError: string | null = null;
@@ -478,6 +526,16 @@ async function runCodexResumeTurnOnce(
         return;
       }
       if (done) {
+        if (currentSessionId === PENDING_DIRECT_SESSION_ID) {
+          reject(
+            new CodexResumeTurnError("codex completed without reporting a session id", {
+              retryable: false,
+              sessionId: currentSessionId,
+              hasAssistantOutput,
+            }),
+          );
+          return;
+        }
         resolve({
           agent: "codex",
           sessionId: currentSessionId,
@@ -508,11 +566,15 @@ async function runCodexResumeTurnOnce(
   });
 }
 
-async function spawnClaudeResumeProcess(
-  sessionId: string,
-  cwd: string,
-): Promise<ChildProcessWithoutNullStreams> {
+async function spawnClaudeProcess(options: {
+  sessionId: string;
+  cwd: string;
+  resume: boolean;
+}): Promise<ChildProcessWithoutNullStreams> {
   return await new Promise<ChildProcessWithoutNullStreams>((resolve, reject) => {
+    const sessionArgs = options.resume
+      ? ["--resume", options.sessionId]
+      : ["--session-id", options.sessionId];
     const child = directBackendRuntime.spawn(
       "claude",
       [
@@ -525,11 +587,10 @@ async function spawnClaudeResumeProcess(
         "--verbose",
         "--permission-mode",
         "bypassPermissions",
-        "--resume",
-        sessionId,
+        ...sessionArgs,
       ],
       {
-        cwd,
+        cwd: options.cwd,
         stdio: ["pipe", "pipe", "pipe"],
         env: filterEnv(process.env, "CLAUDECODE"),
       },
@@ -655,6 +716,13 @@ async function assertSessionExists(
 
   if (!codexSessionFileExists(sessionId)) {
     throw new Error(`No Codex session transcript found for id ${sessionId}`);
+  }
+}
+
+function assertCwdExists(cwd: string): void {
+  const stat = fs.existsSync(cwd) ? fs.statSync(cwd) : null;
+  if (!stat?.isDirectory()) {
+    throw new Error(`cwd does not exist or is not a directory: ${cwd}`);
   }
 }
 

@@ -1,5 +1,7 @@
 import {
   createDirectBinding,
+  createNewDirectBinding,
+  PENDING_DIRECT_SESSION_ID,
   type DirectAgent,
   type DirectBinding,
   type DirectBindingStatus,
@@ -98,9 +100,14 @@ const DIRECT_ROLES: DirectRole[] = ["lead", "partner"];
 export class DirectSessionManager {
   readonly #chats = new Map<string, DirectChatRuntime>();
   readonly #bindingFactory: typeof createDirectBinding;
+  readonly #newBindingFactory: typeof createNewDirectBinding;
 
-  constructor(bindingFactory = createDirectBinding) {
+  constructor(
+    bindingFactory = createDirectBinding,
+    newBindingFactory = createNewDirectBinding,
+  ) {
     this.#bindingFactory = bindingFactory;
+    this.#newBindingFactory = newBindingFactory;
   }
 
   async bind(
@@ -120,6 +127,28 @@ export class DirectSessionManager {
     }
 
     const binding = await this.#bindingFactory(agent, sessionId, cwd);
+    chat.bindings[role] = binding;
+    if (!chat.activeTarget) {
+      chat.activeTarget = role;
+    }
+    return this.current(chatKey);
+  }
+
+  async create(
+    chatKey: string,
+    role: DirectRole,
+    agent: DirectAgent,
+    cwd: string,
+  ): Promise<DirectChatState> {
+    const chat = this.#getOrCreateChat(chatKey);
+    this.#assertNoModeRun(chat, "create a session");
+
+    const existing = chat.bindings[role];
+    if (existing) {
+      await existing.close();
+    }
+
+    const binding = await this.#newBindingFactory(agent, cwd);
     chat.bindings[role] = binding;
     if (!chat.activeTarget) {
       chat.activeTarget = role;
@@ -673,6 +702,13 @@ export class DirectSessionManager {
     const otherRole: DirectRole = role === "lead" ? "partner" : "lead";
     const otherBinding = chat.bindings[otherRole];
     if (!otherBinding) {
+      return;
+    }
+
+    if (
+      sessionId === PENDING_DIRECT_SESSION_ID ||
+      otherBinding.sessionId() === PENDING_DIRECT_SESSION_ID
+    ) {
       return;
     }
 

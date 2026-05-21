@@ -63,6 +63,12 @@ describe("coco direct commands", () => {
       sessionId: "session-1",
       cwd: "/tmp/project with spaces",
     });
+    expect(parseCocoCommand("/coco new lead codex /tmp/project with spaces")).toEqual({
+      name: "new",
+      role: "lead",
+      agent: "codex",
+      cwd: "/tmp/project with spaces",
+    });
     expect(parseCocoCommand("/coco ask partner review this")).toEqual({
       name: "ask",
       role: "partner",
@@ -98,6 +104,7 @@ describe("coco direct commands", () => {
     const handlers = createCocoCommandHandlers({
       deps: {
         bind: vi.fn(async () => makeState()),
+        create: vi.fn(async () => makeState()),
         use: vi.fn(() => makeState()),
         ask: vi.fn(),
         sendToActive: vi.fn(),
@@ -124,11 +131,46 @@ describe("coco direct commands", () => {
     );
   });
 
+  it("creates a new session and reports current state", async () => {
+    const reply = vi.fn(async (_text: string) => {});
+    const create = vi.fn(async () => makeState());
+    const handlers = createCocoCommandHandlers({
+      deps: {
+        bind: vi.fn(),
+        create,
+        use: vi.fn(() => makeState()),
+        ask: vi.fn(),
+        sendToActive: vi.fn(),
+        current: vi.fn(() => makeState()),
+        detach: vi.fn(async () => makeState({ activeTarget: null, bindings: {} })),
+        xcheckOn: vi.fn(() => makeState()),
+        xcheckOff: vi.fn(() => makeState({ xcheck: { ...makeState().xcheck, enabled: false } })),
+        xcheckStop: vi.fn(() => makeState()),
+        collabOn: vi.fn(() => makeState()),
+        collabOff: vi.fn(() => makeState({ collab: { ...makeState().collab, enabled: false } })),
+        collabStop: vi.fn(() => makeState()),
+      },
+    });
+
+    const handled = await handlers.handleCocoCommand({
+      chatKey: "telegram:1001",
+      text: "/coco new lead claude /tmp/project",
+      reply,
+    });
+
+    expect(handled).toBe(true);
+    expect(create).toHaveBeenCalledWith("telegram:1001", "lead", "claude", "/tmp/project");
+    expect(reply).toHaveBeenCalledWith(
+      expect.stringContaining("New claude session is bound for lead in /tmp/project. Send a message to use it."),
+    );
+  });
+
   it("enables xcheck mode", async () => {
     const reply = vi.fn(async (_text: string) => {});
     const handlers = createCocoCommandHandlers({
       deps: {
         bind: vi.fn(),
+        create: vi.fn(),
         use: vi.fn(),
         ask: vi.fn(),
         sendToActive: vi.fn(),
@@ -212,6 +254,7 @@ describe("coco direct commands", () => {
     const handlers = createCocoCommandHandlers({
       deps: {
         bind: vi.fn(),
+        create: vi.fn(),
         use: vi.fn(),
         ask: vi.fn(),
         sendToActive: vi.fn(),
@@ -308,6 +351,7 @@ describe("coco direct commands", () => {
     const handlers = createCocoCommandHandlers({
       deps: {
         bind: vi.fn(),
+        create: vi.fn(),
         use: vi.fn(),
         ask: vi.fn(),
         sendToActive,
@@ -377,6 +421,7 @@ describe("coco direct commands", () => {
     const handlers = createCocoCommandHandlers({
       deps: {
         bind: vi.fn(),
+        create: vi.fn(),
         use: vi.fn(),
         ask: vi.fn(),
         sendToActive: vi.fn(async (_chatKey, _text, options) => {

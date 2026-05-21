@@ -4,8 +4,9 @@
 
 当前最核心的用法是：
 
-- 在电脑上已经有一个正在使用的 Codex / Claude 会话
-- 你出门后，想通过飞书继续和这个会话对话
+- 你给一个项目目录，让 `coco` 直接创建新的 Codex / Claude 会话
+- 或者绑定电脑上已经有的 Codex / Claude 逻辑会话
+- 你出门后，想通过飞书继续和这些会话对话
 - 回到电脑后，再继续使用同一个逻辑会话
 
 这版 README 只讲 `coco` 当前最实用的 direct-session 用法，重点放在 **飞书**。
@@ -133,7 +134,7 @@ npm run telegram
 
 ## 使用前注意
 
-`coco` 现在是 resume 一个已有的逻辑会话，不是 attach 到你电脑上正在打开的 terminal。
+`coco` 操作的是 Codex / Claude 的逻辑会话，不是 attach 到你电脑上正在打开的 terminal。
 
 如果你在飞书里继续了某个 Codex / Claude 会话，电脑上原来开着的 session 不会自动看到手机侧新增的聊天记录。回到电脑后，建议先退出原来的 session，再用同一个 `thread_id` / `session_id` resume。
 
@@ -147,6 +148,32 @@ npm run telegram
 
 ```text
 /coco help
+```
+
+### 创建一个新会话
+
+最常用的是只给项目目录，让 `coco` 新建并绑定 `lead`：
+
+```text
+/coco new lead codex <cwd>
+```
+
+如果是 Claude：
+
+```text
+/coco new lead claude <cwd>
+```
+
+这里：
+
+- `cwd` 是新会话要工作的项目目录
+- Codex 新会话会在你发出第一条普通消息时真正创建，并在回复里更新 `thread_id`
+- Claude 新会话会立即分配一个 `session_id`
+
+如果想让两个 agent 协作，再新建或绑定 `partner`：
+
+```text
+/coco new partner claude <cwd>
 ```
 
 ### 绑定一个已有会话
@@ -205,6 +232,16 @@ npm run telegram
 
 ### 只继续一个已有会话
 
+新建会话：
+
+```text
+/coco new lead codex <cwd>
+/coco current
+<你要发给codex的信息>
+```
+
+绑定已有会话：
+
 ```text
 /coco bind lead codex <thread_id> <cwd>
 /coco current
@@ -214,6 +251,18 @@ npm run telegram
 如果继续 Claude 会话，把 `codex <thread_id>` 换成 `claude <session_id>`。
 
 ### 两个session之间自己协作
+
+新建两个会话：
+
+```text
+/coco new lead codex <cwd>
+/coco new partner claude <cwd>
+/coco current
+/coco collab on 20
+<你要让他们互相对话的信息，这个信息默认先发给lead>
+```
+
+或绑定两个已有会话：
 
 ```text
 /coco bind lead codex <thread_id> <cwd>
@@ -244,13 +293,14 @@ collab already running, please wait
 
 ## 注意事项
 
-### 1. `cwd` 必须对应原来的工作目录
+### 1. `cwd` 必须对应会话的工作目录
 
 这是最重要的一条。
 
 如果你给了错误的 `cwd`：
 
 - Claude 可能找不到 session
+- 新会话会在错误的目录里启动
 - Codex 即使 resume 成功，也可能在错误的 repo / 文件上下文里工作
 
 ### 2. bot 重启后要重新 bind

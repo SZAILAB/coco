@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DirectSessionManager } from "./direct-session.js";
+import { PENDING_DIRECT_SESSION_ID } from "./direct-backend.js";
 import type { DirectAgent, DirectBinding, DirectBindingStatus, DirectSendResult } from "./direct-backend.js";
 
 function createFakeBinding(
@@ -51,6 +52,37 @@ describe("direct session manager", () => {
     expect(state.bindings.lead?.sessionId).toBe("thread-1");
     expect(state.bindings.partner?.agent).toBe("codex");
     expect(state.bindings.partner?.sessionId).toBe("thread-2");
+  });
+
+  it("creates and binds a new session from cwd only", async () => {
+    const createBinding = vi.fn(async (agent: DirectAgent, cwd: string) =>
+      createFakeBinding(agent, PENDING_DIRECT_SESSION_ID, cwd),
+    );
+    const manager = new DirectSessionManager(
+      async (agent, sessionId) => createFakeBinding(agent, sessionId),
+      createBinding,
+    );
+
+    const state = await manager.create("chat-1", "lead", "codex", "/tmp/project");
+
+    expect(createBinding).toHaveBeenCalledWith("codex", "/tmp/project");
+    expect(state.activeTarget).toBe("lead");
+    expect(state.bindings.lead?.agent).toBe("codex");
+    expect(state.bindings.lead?.sessionId).toBe(PENDING_DIRECT_SESSION_ID);
+    expect(state.bindings.lead?.cwd).toBe("/tmp/project");
+  });
+
+  it("allows separate pending sessions for lead and partner", async () => {
+    const manager = new DirectSessionManager(
+      async (agent, sessionId) => createFakeBinding(agent, sessionId),
+      async (agent, cwd) => createFakeBinding(agent, PENDING_DIRECT_SESSION_ID, cwd),
+    );
+
+    await manager.create("chat-1", "lead", "codex", "/tmp/project");
+    const state = await manager.create("chat-1", "partner", "codex", "/tmp/project");
+
+    expect(state.bindings.lead?.sessionId).toBe(PENDING_DIRECT_SESSION_ID);
+    expect(state.bindings.partner?.sessionId).toBe(PENDING_DIRECT_SESSION_ID);
   });
 
   it("rejects binding lead and partner to the same underlying session", async () => {

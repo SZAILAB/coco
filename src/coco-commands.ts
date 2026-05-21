@@ -14,6 +14,7 @@ export type CocoCommandDeps = {
     sessionId: string,
     cwd: string,
   ): Promise<DirectChatState>;
+  create(chatKey: string, role: DirectRole, agent: DirectAgent, cwd: string): Promise<DirectChatState>;
   use(chatKey: string, role: DirectRole): DirectChatState;
   ask(chatKey: string, role: DirectRole, text: string): Promise<DirectSendResult>;
   sendToActive(
@@ -45,6 +46,7 @@ type ParsedCocoCommand =
   | { name: "help" }
   | { name: "current" }
   | { name: "bind"; role: DirectRole; agent: DirectAgent; sessionId: string; cwd: string }
+  | { name: "new"; role: DirectRole; agent: DirectAgent; cwd: string }
   | { name: "use"; role: DirectRole }
   | { name: "ask"; role: DirectRole; text: string }
   | { name: "detach"; role?: DirectRole }
@@ -87,6 +89,26 @@ export function createCocoCommandHandlers(runtime: CocoCommandRuntime) {
             );
           } catch (err) {
             await message.reply(`Failed to bind ${parsed.role}: ${err}`);
+          }
+          return true;
+        }
+
+        case "new": {
+          try {
+            const state = await runtime.deps.create(
+              message.chatKey,
+              parsed.role,
+              parsed.agent,
+              parsed.cwd,
+            );
+            await message.reply(
+              [
+                `New ${parsed.agent} session is bound for ${parsed.role} in ${parsed.cwd}. Send a message to use it.`,
+                formatCurrentState(state),
+              ].join("\n\n"),
+            );
+          } catch (err) {
+            await message.reply(`Failed to create ${parsed.role}: ${err}`);
           }
           return true;
         }
@@ -281,6 +303,13 @@ export function parseCocoCommand(text: string): ParsedCocoCommand | null {
       if (!isDirectRole(role) || !isDirectAgent(agent) || !cwd.trim()) return { name: "help" };
       return { name: "bind", role, agent, sessionId, cwd: cwd.trim() };
     }
+    case "new": {
+      const match = rest.match(/^(\S+)\s+(\S+)\s+(.+)$/);
+      if (!match) return { name: "help" };
+      const [, role, agent, cwd] = match;
+      if (!isDirectRole(role) || !isDirectAgent(agent) || !cwd.trim()) return { name: "help" };
+      return { name: "new", role, agent, cwd: cwd.trim() };
+    }
     case "use": {
       if (!isDirectRole(rest)) return { name: "help" };
       return { name: "use", role: rest };
@@ -338,6 +367,8 @@ export function parseCocoCommand(text: string): ParsedCocoCommand | null {
 export function buildCocoHelpText(): string {
   return [
     "coco session commands:",
+    "/coco new lead <codex|claude> <cwd> - Create and bind a new Codex or Claude session",
+    "/coco new partner <codex|claude> <cwd> - Create and bind a new Codex or Claude session",
     "/coco bind lead <codex|claude> <session_id> <cwd> - Bind the lead role to a Codex or Claude session",
     "/coco bind partner <codex|claude> <session_id> <cwd> - Bind the partner role to a Codex or Claude session",
     "/coco use <lead|partner> - Set the default direct-chat target",
@@ -366,7 +397,7 @@ export function buildNoActiveTargetText(state?: DirectChatState): string {
   if (!lead && !partner) {
     return [
       "No direct sessions are bound for this chat.",
-      "To start chatting, bind lead first with /coco bind lead <codex|claude> <session_id> <cwd>.",
+      "To start chatting, create a new lead with /coco new lead <codex|claude> <cwd>, or bind lead first with /coco bind lead <codex|claude> <session_id> <cwd>.",
       "For xcheck / collab, bind both lead and partner.",
     ].join("\n");
   }
@@ -374,14 +405,14 @@ export function buildNoActiveTargetText(state?: DirectChatState): string {
   if (lead && !partner) {
     return [
       `Lead is bound to ${lead.agent} and ready for direct chat.`,
-      "To use xcheck / collab, bind partner with /coco bind partner <codex|claude> <session_id> <cwd>.",
+      "To use xcheck / collab, create a new partner with /coco new partner <codex|claude> <cwd>, or bind partner with /coco bind partner <codex|claude> <session_id> <cwd>.",
     ].join("\n");
   }
 
   if (!lead && partner) {
     return [
       `Only partner is bound to ${partner.agent}.`,
-      "For the standard workflow, bind lead first with /coco bind lead <codex|claude> <session_id> <cwd>.",
+      "For the standard workflow, create a new lead with /coco new lead <codex|claude> <cwd>, or bind lead first with /coco bind lead <codex|claude> <session_id> <cwd>.",
       "For xcheck / collab, bind both lead and partner.",
     ].join("\n");
   }

@@ -91,6 +91,7 @@ async function startSingleFeishuBot(env: FeishuEnv): Promise<Lark.WSClient> {
   const cocoHandlers = createCocoCommandHandlers({
     deps: {
       bind: (chatKey, role, agent, sessionId, cwd) => directSessions.bind(chatKey, role, agent, sessionId, cwd),
+      create: (chatKey, role, agent, cwd) => directSessions.create(chatKey, role, agent, cwd),
       use: (chatKey, role) => directSessions.use(chatKey, role),
       ask: (chatKey, role, text) => directSessions.ask(chatKey, role, text),
       sendToActive: (chatKey, text, options) => directSessions.sendToActive(chatKey, text, options),

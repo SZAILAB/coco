@@ -4,7 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createDirectBinding, directBackendTesting } from "./direct-backend.js";
+import {
+  createDirectBinding,
+  createNewDirectBinding,
+  directBackendTesting,
+  PENDING_DIRECT_SESSION_ID,
+} from "./direct-backend.js";
 
 const spawnMock = vi.fn();
 
@@ -135,6 +140,71 @@ describe("direct backend codex retry handling", () => {
   });
 });
 
+describe("direct backend new session creation", () => {
+  it("starts a new Codex session on the first send", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "coco-cwd-"));
+
+    spawnMock.mockImplementationOnce(() =>
+      createFakeChild((child) => {
+        emitJsonLine(child.stdout, { type: "thread.started", thread_id: "thread-new" });
+        emitJsonLine(child.stdout, {
+          type: "item.completed",
+          item: {
+            type: "message",
+            content: [{ type: "output_text", text: "new reply" }],
+          },
+        });
+        emitJsonLine(child.stdout, { type: "turn.completed" });
+        closeChild(child, 0);
+      }),
+    );
+
+    directBackendTesting.setSpawn(spawnMock as never);
+    const binding = await createNewDirectBinding("codex", cwd);
+
+    expect(binding.sessionId()).toBe(PENDING_DIRECT_SESSION_ID);
+
+    const result = await binding.send("hello new session");
+
+    expect(result).toEqual({
+      agent: "codex",
+      sessionId: "thread-new",
+      text: "new reply",
+    });
+    expect(binding.sessionId()).toBe("thread-new");
+    const args = spawnMock.mock.calls[0]?.[1] as string[];
+    expect(args).toEqual([
+      "exec",
+      "--skip-git-repo-check",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--json",
+      "hello new session",
+    ]);
+
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("creates a new Claude session with a generated session id", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "coco-cwd-"));
+
+    spawnMock.mockImplementationOnce(() => createFakeSpawnedChild(() => {}));
+
+    directBackendTesting.setSpawn(spawnMock as never);
+    const binding = await createNewDirectBinding("claude", cwd);
+
+    expect(binding.sessionId()).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    const args = spawnMock.mock.calls[0]?.[1] as string[];
+    expect(args).toContain("--session-id");
+    expect(args).toContain(binding.sessionId());
+    expect(args).not.toContain("--resume");
+    expect(spawnMock.mock.calls[0]?.[2]).toEqual(expect.objectContaining({ cwd }));
+
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+});
+
 function createCodexHome(sessionId: string): string {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "coco-codex-home-"));
   const sessionsDir = path.join(codexHome, "sessions", "2026", "04", "04");
@@ -151,6 +221,12 @@ function createFakeChild(run: (child: FakeChild) => void): FakeChild {
   child.kill = vi.fn();
 
   queueMicrotask(() => run(child));
+  return child;
+}
+
+function createFakeSpawnedChild(run: (child: FakeChild) => void): FakeChild {
+  const child = createFakeChild(run);
+  queueMicrotask(() => child.emit("spawn"));
   return child;
 }
 
